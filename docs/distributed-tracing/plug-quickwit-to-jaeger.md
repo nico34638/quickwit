@@ -24,6 +24,8 @@ We also set `QW_ENABLE_OPENTELEMETRY_OTLP_EXPORTER` and `OTEL_EXPORTER_OTLP_ENDP
 
 Let's start a Jaeger UI instance with docker. Here we need to inform jaeger that it should use quickwit as its backend.
 
+**Note**: This tutorial uses Jaeger Query 1.60, which supports the Jaeger v1 API. If you're using Jaeger 2.6 or later, the v2 API will be used automatically. Quickwit supports both versions.
+
 Due to some idiosyncrasy associated with networking with containers, we will have to use a different approach on MacOS & Windows on one side, and Linux on the other side.
 
 ### MacOS & Windows

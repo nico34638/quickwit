@@ -7,6 +7,8 @@ In this quick start guide, we will set up a Quickwit instance and analyze its ow
 
 You only need a minute to get Jaeger working with Quickwit storage backend.
 
+**Note**: This tutorial uses Jaeger Query 1.60. Quickwit supports both Jaeger v1 (SpanReaderPlugin) and v2 (TraceReader) APIs. Jaeger 2.6+ uses only the v2 API, which Quickwit fully supports.
+
 ## Start Quickwit and Jaeger
 
 Let's use `docker compose` with the following configuration:

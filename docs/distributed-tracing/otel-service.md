@@ -5,7 +5,7 @@ sidebar_position: 5
 
 Quickwit natively supports the [OpenTelemetry Protocol (OTLP)](https://opentelemetry.io/docs/reference/specification/protocol/otlp/) and provides a gRPC endpoint to receive spans from an OpenTelemetry collector, or from your application directly, via an exporter. This endpoint is enabled by default.
 
-When enabled, Quickwit will start the gRPC service ready to receive spans from an OpenTelemetry collector. The spans are indexed in the `otel-trace-v0_7` index by default, and this index will be automatically created if not present. The index doc mapping is described in the next [section](#trace-and-span-data-model).
+When enabled, Quickwit will start the gRPC service ready to receive spans from an OpenTelemetry collector. The spans are indexed in the `otel-trace-v0_9` index by default, and this index will be automatically created if not present. The index doc mapping is described in the next [section](#trace-and-span-data-model).
 
 If for any reason, you want to disable this endpoint, you can:
 - Set the `QW_ENABLE_OTLP_ENDPOINT` environment variable to `false` when starting Quickwit.
@@ -24,17 +24,17 @@ You can send spans in the index of your choice by setting the header `qw-otel-tr
 
 ## Trace and span data model
 
-A trace is a collection of spans that represents a single request. A span represents a single operation within a trace. OpenTelemetry collectors send spans, Quickwit then indexes them in the `otel-trace-v0_7` index by default that maps OpenTelemetry span model to an indexed document in Quickwit.
+A trace is a collection of spans that represents a single request. A span represents a single operation within a trace. OpenTelemetry collectors send spans, Quickwit then indexes them in the `otel-trace-v0_9` index by default that maps OpenTelemetry span model to an indexed document in Quickwit.
 
 The span model is derived from the [OpenTelemetry specification](https://opentelemetry.io/docs/reference/specification/trace/api/).
 
-Below is the doc mapping of the `otel-trace-v0_7` index:
+Below is the doc mapping of the `otel-trace-v0_9` index:
 
 ```yaml
 
-version: 0.7
+version: 0.9
 
-index_id: otel-trace-v0_7
+index_id: otel-trace-v0_9
 
 doc_mapping:
   mode: strict
