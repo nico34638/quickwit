@@ -9,7 +9,7 @@ You only need a minute to get Jaeger working with Quickwit storage backend.
 
 **Note**: This tutorial uses Jaeger Query 1.60. Quickwit supports both Jaeger v1 (SpanReaderPlugin) and v2 (TraceReader) APIs. Jaeger 2.6+ uses only the v2 API, which Quickwit fully supports.
 
-## Start Quickwit and Jaeger
+## Start Quickwit and Jaeger V2
 
 Let's use `docker compose` with the following configuration:
 
@@ -18,25 +18,68 @@ version: "3"
 
 services:
   quickwit:
-    image: quickwit/quickwit:${QW_VERSION:-0.8.1}
-    volumes:
-      - ./qwdata:/quickwit/qwdata
+    image: quickwit/quickwit:edge
     ports:
       - 7280:7280
+      - 7281:7281
     environment:
       - QW_ENABLE_OPENTELEMETRY_OTLP_EXPORTER=true
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:7281
     command: ["run"]
 
   jaeger-query:
-    image: jaegertracing/jaeger-query:1.60
+    image: jaegertracing/jaeger:2.14.1
     ports:
       - 16686:16686
-    environment:
-      - SPAN_STORAGE_TYPE=grpc
-      - GRPC_STORAGE_SERVER=quickwit:7281
-      - GRPC_STORAGE_TLS=false
+    command: ["--config", "/etc/jaeger/config.yaml"]
+    volumes:
+      - ./jaeger-config.yaml:/etc/jaeger/config.yaml
+
 ```
+
+
+Let's setup Jaeger V2 with this basic configuration:
+```yaml title="jaeger-config.yaml"
+extensions:
+  jaeger_storage:
+    backends:
+      quickwit_trace_storage:
+        grpc:
+          endpoint: "quickwit:7281"
+          tls:
+            insecure: true
+
+  jaeger_query:
+    storage:
+      traces: quickwit_trace_storage
+
+    base_path: "/"
+    max_clock_skew_adjust: "30s"
+
+service:
+  extensions:
+    - jaeger_storage
+    - jaeger_query
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [jaeger_storage_exporter]
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+      http:
+
+processors:
+  batch:
+
+exporters:
+  jaeger_storage_exporter:
+    trace_storage: quickwit_trace_storage
+```
+
 
 As you can see in the docker compose file, Quickwit is configured to send its own traces `OTEL_EXPORTER_OTLP_ENDPOINT` to itself `http://localhost:7281`.
 On the other side, Jaeger is configured to use a gRPC storage server `quickwit:7281`.

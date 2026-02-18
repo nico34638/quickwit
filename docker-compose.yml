@@ -21,8 +21,8 @@ networks:
     name: quickwit-network
     ipam:
       config:
-      - subnet: 172.16.7.0/24
-        gateway: 172.16.7.1
+        - subnet: 172.16.7.0/24
+          gateway: 172.16.7.1
 
 services:
   localstack:
@@ -42,7 +42,14 @@ services:
       - .localstack:/etc/localstack/init/ready.d
       - localstack_data:/var/lib/localstack
     healthcheck:
-      test: ["CMD", "curl", "-k", "-f", "https://localhost:4566/quickwit-integration-tests"]
+      test:
+        [
+          "CMD",
+          "curl",
+          "-k",
+          "-f",
+          "https://localhost:4566/quickwit-integration-tests",
+        ]
       interval: 1s
       timeout: 5s
       retries: 100
@@ -96,47 +103,47 @@ services:
       - kafka
 
     environment:
-          # Mode KRaft (Single Node)
-          KAFKA_NODE_ID: 1
-          KAFKA_PROCESS_ROLES: 'broker,controller'
-          KAFKA_CONTROLLER_QUORUM_VOTERS: '1@localhost:9093'
-          KAFKA_LOG4J_LOGGERS: "org.apache.kafka.image.loader.MetadataLoader=WARN"
+      # Mode KRaft (Single Node)
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@localhost:9093"
+      KAFKA_LOG4J_LOGGERS: "org.apache.kafka.image.loader.MetadataLoader=WARN"
 
-          # Listeners
-          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT'
-          KAFKA_LISTENERS: 'EXTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093'
-          KAFKA_ADVERTISED_LISTENERS: 'EXTERNAL://localhost:9092'
-          KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
-          KAFKA_INTER_BROKER_LISTENER_NAME: 'EXTERNAL'
+      # Listeners
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT"
+      KAFKA_LISTENERS: "EXTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093"
+      KAFKA_ADVERTISED_LISTENERS: "EXTERNAL://localhost:9092"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "EXTERNAL"
 
-          # Configuration simplifiée
-          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-          KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-          KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
-          KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      # Configuration simplifiée
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
 
-          # ID du Cluster (Nécessaire pour KRaft)
-          CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
+      # ID du Cluster (Nécessaire pour KRaft)
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
 
-          KAFKA_HEAP_OPTS: -Xms256M -Xmx256M
+      KAFKA_HEAP_OPTS: -Xms256M -Xmx256M
     healthcheck:
-        # test: ["CMD-SHELL", "nc -z localhost 9092 || exit 1"]
-        test: ["CMD", "ub", "kafka-ready", "-b", "localhost:9092", "1", "5"]
-        start_period: 5s
-        interval: 5s
-        timeout: 10s
-        retries: 100
+      # test: ["CMD-SHELL", "nc -z localhost 9092 || exit 1"]
+      test: ["CMD", "ub", "kafka-ready", "-b", "localhost:9092", "1", "5"]
+      start_period: 5s
+      interval: 5s
+      timeout: 10s
+      retries: 100
 
   azurite:
     image: mcr.microsoft.com/azure-storage/azurite:${AZURITE_VERSION:-3.24.0}
     container_name: azurite
     ports:
-        - "${MAP_HOST_AZURITE:-127.0.0.1}:10000:10000" # Blob store port
+      - "${MAP_HOST_AZURITE:-127.0.0.1}:10000:10000" # Blob store port
     profiles:
       - all
       - azurite
     volumes:
-        - azurite_data:/data
+      - azurite_data:/data
     command: azurite --blobHost 0.0.0.0 --loose
 
   fake-gcs-server:
@@ -182,12 +189,12 @@ services:
     image: otel/opentelemetry-collector:${OTEL_VERSION:-0.84.0}
     container_name: otel-collector
     ports:
-      - "${MAP_HOST_OTEL:-127.0.0.1}:1888:1888"   # pprof extension
-      - "${MAP_HOST_OTEL:-127.0.0.1}:8888:8888"   # Prometheus metrics exposed by the collector
-      - "${MAP_HOST_OTEL:-127.0.0.1}:8889:8889"   # Prometheus exporter metrics
+      - "${MAP_HOST_OTEL:-127.0.0.1}:1888:1888" # pprof extension
+      - "${MAP_HOST_OTEL:-127.0.0.1}:8888:8888" # Prometheus metrics exposed by the collector
+      - "${MAP_HOST_OTEL:-127.0.0.1}:8889:8889" # Prometheus exporter metrics
       - "${MAP_HOST_OTEL:-127.0.0.1}:13133:13133" # health_check extension
-      - "${MAP_HOST_OTEL:-127.0.0.1}:4317:4317"   # OTLP gRPC receiver
-      - "${MAP_HOST_OTEL:-127.0.0.1}:4318:4318"   # OTLP http receiver
+      - "${MAP_HOST_OTEL:-127.0.0.1}:4317:4317" # OTLP gRPC receiver
+      - "${MAP_HOST_OTEL:-127.0.0.1}:4318:4318" # OTLP http receiver
       - "${MAP_HOST_OTEL:-127.0.0.1}:55679:55679" # zpages extension
     profiles:
       - otel
