@@ -154,8 +154,13 @@ impl TraceReader for JaegerService {
                     }
                 };
 
-                let end = OffsetDateTime::now_utc().unix_timestamp();
-                let search_window = (end - lookback_period_secs)..=end;
+                let search_window = match (query_params.start_time, query_params.end_time) {
+                    (Some(start), Some(end)) => start.seconds..=end.seconds,
+                    _ => {
+                        let end = OffsetDateTime::now_utc().unix_timestamp();
+                        (end - lookback_period_secs)..=end
+                    }
+                };
 
                 let otel_spans = match stream_otel_spans_impl(
                     search_service.clone(),

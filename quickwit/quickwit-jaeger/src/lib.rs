@@ -2799,4 +2799,114 @@ mod tests {
 
     // Note: test_spans_to_otel_traces_data was removed as v2 now works directly with
     // native OpenTelemetry format (QwSpan) instead of converting from Jaeger v1 format
+
+    // Test for bug 1: get_traces v2 must use start_time/end_time from GetTraceParams
+    // when provided, instead of always falling back to lookback_period_secs.
+    //
+    // The request provides start_time=1000s and end_time=2000s. The search window sent
+    // to root_search MUST match those bounds. With the bug, the window is computed as
+    // [now - lookback_period, now], which will not match, and root_search returns an
+    // empty response — causing the test to fail because the span is never returned.
+    #[tokio::test]
+    async fn test_v2_get_traces_uses_start_end_time_from_request() {
+        use quickwit_opentelemetry::otlp::{SpanId, SpanStatus, TraceId as OtlpTraceId};
+        use quickwit_proto::search::Hit as SearchHit;
+
+        let trace_id = OtlpTraceId::new([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+        let span_id = SpanId::new([1, 2, 3, 4, 5, 6, 7, 8]);
+
+        let span = quickwit_opentelemetry::otlp::Span {
+            trace_id,
+            trace_state: None,
+            service_name: "test-service".to_string(),
+            resource_attributes: Default::default(),
+            resource_dropped_attributes_count: 0,
+            scope_name: None,
+            scope_version: None,
+            scope_attributes: Default::default(),
+            scope_dropped_attributes_count: 0,
+            span_id,
+            span_kind: 0,
+            span_name: "test-op".to_string(),
+            span_fingerprint: None,
+            span_start_timestamp_nanos: 1500_000_000_000u64,
+            span_end_timestamp_nanos: 1501_000_000_000u64,
+            span_duration_millis: Some(1000),
+            span_attributes: Default::default(),
+            span_dropped_attributes_count: 0,
+            span_dropped_events_count: 0,
+            span_dropped_links_count: 0,
+            span_status: SpanStatus::default(),
+            parent_span_id: None,
+            is_root: Some(true),
+            events: vec![],
+            event_names: vec![],
+            links: vec![],
+        };
+        let span_json = serde_json::to_string(&span).unwrap();
+
+        let request_start_secs: i64 = 1000;
+        let request_end_secs: i64 = 2000;
+
+        let mut mock_search_service = MockSearchService::new();
+        mock_search_service
+            .expect_root_search()
+            // This withf asserts the bug fix: the search window must come from the
+            // request's start_time/end_time, not from lookback_period_secs.
+            .withf(move |req| {
+                req.start_timestamp == Some(request_start_secs)
+                    && req.end_timestamp == Some(request_end_secs)
+            })
+            .return_once(move |_| {
+                Ok(quickwit_proto::search::SearchResponse {
+                    num_hits: 1,
+                    hits: vec![SearchHit {
+                        json: span_json,
+                        ..Default::default()
+                    }],
+                    elapsed_time_micros: 100,
+                    errors: Vec::new(),
+                    aggregation_postcard: None,
+                    scroll_id: None,
+                    failed_splits: Vec::new(),
+                    num_successful_splits: 1,
+                })
+            });
+
+        let service = Arc::new(mock_search_service);
+        let jaeger = JaegerService::new(JaegerConfig::default(), service);
+
+        let request = tonic::Request::new(
+            quickwit_proto::jaeger::storage::v2::GetTracesRequest {
+                query: vec![quickwit_proto::jaeger::storage::v2::GetTraceParams {
+                    trace_id: trace_id.to_vec(),
+                    start_time: Some(prost_types::Timestamp {
+                        seconds: request_start_secs,
+                        nanos: 0,
+                    }),
+                    end_time: Some(prost_types::Timestamp {
+                        seconds: request_end_secs,
+                        nanos: 0,
+                    }),
+                }],
+            },
+        );
+
+        let mut stream =
+            quickwit_proto::jaeger::storage::v2::trace_reader_server::TraceReader::get_traces(
+                &jaeger, request,
+            )
+            .await
+            .unwrap()
+            .into_inner();
+
+        use tokio_stream::StreamExt;
+        let chunk = stream.next().await.expect("expected one TracesData chunk").unwrap();
+        assert_eq!(chunk.resource_spans.len(), 1);
+        assert_eq!(chunk.resource_spans[0].scope_spans[0].spans.len(), 1);
+        assert_eq!(
+            chunk.resource_spans[0].scope_spans[0].spans[0].trace_id,
+            trace_id.to_vec()
+        );
+    }
 }
