@@ -19,6 +19,7 @@ use std::task::{Context, Poll};
 
 use pin_project::pin_project;
 use tokio::task::{JoinError, JoinHandle};
+use tokio_inherit_task_local::FutureInheritTaskLocal;
 use tower::{Layer, Service};
 use tracing::{Instrument, error};
 
@@ -75,8 +76,9 @@ where
         // `tokio::spawn` does not propagate the caller's tracing span — task
         // locals are reset on a fresh task. `in_current_span` re-enters the
         // caller's span inside the spawned future so emitted events and
-        // child spans stay attached to the same trace.
-        let join_handle = tokio::spawn(future.in_current_span());
+        // child spans stay attached to the same trace, and `inherit_task_local`
+        // keeps the authorization context of the caller.
+        let join_handle = tokio::spawn(future.in_current_span().inherit_task_local());
         UnwrapOrElseFuture {
             request_name,
             join_handle,

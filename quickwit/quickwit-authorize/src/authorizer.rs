@@ -18,8 +18,9 @@ use anyhow::bail;
 use biscuit_auth::{Authorizer, AuthorizerBuilder};
 use tracing::debug;
 
+use crate::context::current_token;
 use crate::state::{EnabledState, enabled_state};
-use crate::{AUTHORIZATION_TOKEN, AuthorizationError, AuthorizationToken};
+use crate::{AuthorizationError, AuthorizationToken};
 
 /// Coarse-grained family of operations a request belongs to.
 #[derive(Default, Debug, Copy, Clone, Eq, PartialEq)]
@@ -64,24 +65,31 @@ pub trait Authorization {
     fn request_family(&self) -> RequestFamily;
 }
 
+/// Without a request family, only the checks of the token itself (expiration) are evaluated.
 fn build_authorizer(
     state: &EnabledState,
-    request_family: RequestFamily,
+    request_family_opt: Option<RequestFamily>,
     token: &AuthorizationToken,
 ) -> Result<Authorizer, AuthorizationError> {
-    let request_family_str = request_family.as_str();
+    // A `check all` without any matching fact fails, so the check is only added with a request.
+    let request_datalog = match request_family_opt {
+        Some(request_family) => format!(
+            "request(\"{}\");\ncheck all request($request), right($request);",
+            request_family.as_str()
+        ),
+        None => String::new(),
+    };
     // Node tokens (`service(...)` facts) are granted every right: nodes act on behalf of
     // background tasks and of users whose rights were already checked at the edge.
     let datalog = format!(
         r#"
-        request("{request_family_str}");
+        {request_datalog}
 
         right($request) <- role($role), role_right($role, $request);
         right($request) <- service($service), request($request);
 
         {}
 
-        check all request($request), right($request);
         allow if true;
         "#,
         state.role_rights_datalog
@@ -100,37 +108,38 @@ pub(crate) fn authorize_with_token(
     request_family: RequestFamily,
     token: &AuthorizationToken,
 ) -> Result<(), AuthorizationError> {
-    let mut authorizer = build_authorizer(state, request_family, token)?;
+    authorize_with_optional_family(state, Some(request_family), token)
+}
+
+pub(crate) fn authorize_with_optional_family(
+    state: &EnabledState,
+    request_family_opt: Option<RequestFamily>,
+    token: &AuthorizationToken,
+) -> Result<(), AuthorizationError> {
+    let mut authorizer = build_authorizer(state, request_family_opt, token)?;
     authorizer.authorize().map_err(|error| {
-        debug!(request_family = request_family.as_str(), error = %error, "permission denied");
+        debug!(
+            request_family = request_family_opt.map(|request_family| request_family.as_str()),
+            error = %error,
+            "permission denied"
+        );
         AuthorizationError::PermissionDenied
     })?;
     Ok(())
 }
 
-/// Checks the request against the token of the current task, or the node token if there is none.
+/// Checks the request against the token of the current task. Fails if there is none: see
+/// [`crate::context::current_token`].
 ///
 /// Always succeeds when authorization is disabled.
 pub fn authorize_request<R: Authorization>(request: &R) -> Result<(), AuthorizationError> {
     let Some(state) = enabled_state() else {
         return Ok(());
     };
-    let request_family = request.request_family();
-    let token_opt = AUTHORIZATION_TOKEN.try_with(|token| token.clone()).ok();
-    let token = match token_opt {
-        Some(token) => token,
-        None => {
-            // TODO: this fallback silently grants node rights to a user request whose task lost
-            // its authorization context (for instance, a `tokio::spawn` that does not inherit
-            // task-locals). Rights are also checked at the edge, but this should be tracked.
-            debug!(
-                request_family = request_family.as_str(),
-                "no authorization token in context, using node token"
-            );
-            state.node_token.clone()
-        }
+    let Some(token) = current_token(std::any::type_name::<R>()) else {
+        return Err(AuthorizationError::AuthorizationTokenMissing);
     };
-    authorize_with_token(state, request_family, &token)
+    authorize_with_token(state, request.request_family(), &token)
 }
 
 #[cfg(test)]
@@ -247,6 +256,26 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_secs(1));
         assert_eq!(
             authorize_with_token(&state, RequestFamily::IndexRead, &token).unwrap_err(),
+            AuthorizationError::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn test_authorize_without_request_family_checks_expiration() {
+        let (private_key_hex, state) = make_state();
+        let reader = make_user_token(&private_key_hex, state.root_public_key, &["reader"], None);
+        authorize_with_optional_family(&state, None, &reader).unwrap();
+        let intern = make_user_token(&private_key_hex, state.root_public_key, &["intern"], None);
+        authorize_with_optional_family(&state, None, &intern).unwrap();
+        let expired = make_user_token(
+            &private_key_hex,
+            state.root_public_key,
+            &["admin"],
+            Some(std::time::Duration::ZERO),
+        );
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        assert_eq!(
+            authorize_with_optional_family(&state, None, &expired).unwrap_err(),
             AuthorizationError::PermissionDenied
         );
     }

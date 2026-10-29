@@ -232,6 +232,12 @@ pub const fn div_ceil(lhs: i64, rhs: i64) -> i64 {
 //
 // Actors will get named after their type, which is fine. For other tasks,
 // please use `snake_case`.
+//
+// # Authorization
+//
+// Spawned tasks inherit the authorization context (see `quickwit_authorize::AUTHORIZATION_TOKEN`)
+// of the caller: a task spawned while serving a user request acts on behalf of that user, a task
+// spawned by a system task acts on behalf of the node.
 
 #[cfg(not(all(tokio_unstable, feature = "named_tasks")))]
 #[track_caller]
@@ -240,7 +246,8 @@ where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    tokio::task::spawn(future)
+    use tokio_inherit_task_local::FutureInheritTaskLocal;
+    tokio::task::spawn(future.inherit_task_local())
 }
 
 #[cfg(not(all(tokio_unstable, feature = "named_tasks")))]
@@ -254,7 +261,8 @@ where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    runtime.spawn(future)
+    use tokio_inherit_task_local::FutureInheritTaskLocal;
+    runtime.spawn(future.inherit_task_local())
 }
 
 #[cfg(all(tokio_unstable, feature = "named_tasks"))]
@@ -264,9 +272,10 @@ where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
+    use tokio_inherit_task_local::FutureInheritTaskLocal;
     tokio::task::Builder::new()
         .name(name)
-        .spawn(future)
+        .spawn(future.inherit_task_local())
         .unwrap()
 }
 
@@ -281,9 +290,10 @@ where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
+    use tokio_inherit_task_local::FutureInheritTaskLocal;
     tokio::task::Builder::new()
         .name(name)
-        .spawn_on(future, runtime)
+        .spawn_on(future.inherit_task_local(), runtime)
         .unwrap()
 }
 

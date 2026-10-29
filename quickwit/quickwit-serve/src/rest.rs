@@ -26,6 +26,7 @@ use hyper_util::service::TowerToHyperService;
 use quickwit_common::tower::BoxFutureInfaillible;
 use quickwit_config::{disable_ingest_v1, enable_ingest_v2};
 use quickwit_metrics::{counter, histogram, labels};
+use quickwit_proto::ServiceError;
 use quickwit_search::SearchService;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinSet;
@@ -88,24 +89,52 @@ impl std::fmt::Display for TooManyRequests {
     }
 }
 
-/// The request carries no valid authorization token while authorization is enabled.
+/// The request is rejected by the authorization checks of the REST edge.
 #[derive(Debug)]
-pub(crate) struct Unauthenticated(pub quickwit_authorize::AuthorizationError);
+pub(crate) struct AuthorizationRejection(pub quickwit_authorize::AuthorizationError);
 
-impl warp::reject::Reject for Unauthenticated {}
+impl warp::reject::Reject for AuthorizationRejection {}
 
-/// Rejects requests without a valid authorization token. Always passes when authorization is
-/// disabled.
+/// Path prefixes of the routes served by their REST handler alone, without calling any service
+/// through a gRPC client checked by an `AuthorizationLayer`. They expose or change the state of the
+/// node and the cluster, so they require the `cluster` right.
+const CLUSTER_REST_PATH_PREFIXES: &[&str] = &[
+    "/api/v1/cluster",
+    "/api/v1/config",
+    "/api/v1/indexing",
+    "/api/developer/",
+];
+
+/// Returns the request family checked at the REST edge for `path`, if any.
+fn rest_request_family(path: &str) -> Option<quickwit_authorize::RequestFamily> {
+    CLUSTER_REST_PATH_PREFIXES
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
+        .then_some(quickwit_authorize::RequestFamily::Cluster)
+}
+
+/// Rejects requests without a valid authorization token (bad signature or expired), and requests
+/// to the routes of `CLUSTER_REST_PATH_PREFIXES` whose token lacks the `cluster` right. Always
+/// passes when authorization is disabled.
 ///
 /// The token itself is scoped for the duration of the request by the
-/// `AuthorizationTokenExtractionLayer`: this filter only makes sure that a request cannot run
-/// without a token, in which case its gRPC calls would fall back to the node token.
+/// `AuthorizationTokenExtractionLayer`. The other routes are checked by the `AuthorizationLayer`
+/// of the services they call.
 fn require_authorization() -> impl Filter<Extract = (), Error = Rejection> + Clone {
-    warp::header::optional::<String>(http::header::AUTHORIZATION.as_str())
-        .and_then(|header_value_opt: Option<String>| async move {
-            quickwit_authorize::check_rest_authorization_header(header_value_opt.as_deref())
-                .map_err(|error| warp::reject::custom(Unauthenticated(error)))
-        })
+    warp::path::full()
+        .and(warp::header::optional::<String>(
+            http::header::AUTHORIZATION.as_str(),
+        ))
+        .and_then(
+            |full_path: warp::path::FullPath, header_value_opt: Option<String>| async move {
+                let request_family_opt = rest_request_family(full_path.as_str());
+                quickwit_authorize::check_rest_authorization_header(
+                    header_value_opt.as_deref(),
+                    request_family_opt,
+                )
+                .map_err(|error| warp::reject::custom(AuthorizationRejection(error)))
+            },
+        )
         .untuple_one()
 }
 
@@ -708,9 +737,9 @@ fn get_status_with_error(rejection: Rejection) -> Result<RestApiError, Rejection
             status_code: StatusCode::PAYLOAD_TOO_LARGE,
             message: error.to_string(),
         })
-    } else if let Some(error) = rejection.find::<Unauthenticated>() {
+    } else if let Some(error) = rejection.find::<AuthorizationRejection>() {
         Ok(RestApiError {
-            status_code: StatusCode::UNAUTHORIZED,
+            status_code: error.0.error_code().http_status_code(),
             message: error.0.to_string(),
         })
     } else if let Some(err) = rejection.find::<TooManyRequests>() {
@@ -736,7 +765,9 @@ fn get_status_with_error(rejection: Rejection) -> Result<RestApiError, Rejection
 
 fn build_cors(cors_origins: &[String]) -> CorsLayer {
     // MCP Streamable HTTP uses JSON POSTs with an explicit protocol version header.
+    // `Authorization` carries the token when authorization is enabled.
     let allowed_headers = [
+        http::header::AUTHORIZATION,
         http::header::CONTENT_TYPE,
         http::header::HeaderName::from_static("mcp-protocol-version"),
     ];
@@ -808,6 +839,34 @@ mod tests {
     use super::*;
     use crate::rest::recover_fn_final;
 
+    #[test]
+    fn test_rest_request_family() {
+        use quickwit_authorize::RequestFamily;
+
+        for path in [
+            "/api/v1/cluster",
+            "/api/v1/config",
+            "/api/v1/indexing",
+            "/api/developer/log-level",
+            "/api/developer/pprof/start",
+        ] {
+            assert_eq!(
+                rest_request_family(path),
+                Some(RequestFamily::Cluster),
+                "{path}"
+            );
+        }
+        for path in [
+            "/api/v1/indexes",
+            "/api/v1/logs/search",
+            "/api/v1/version",
+            "/api/v1/_elastic/_bulk",
+            "/mcp",
+        ] {
+            assert_eq!(rest_request_family(path), None, "{path}");
+        }
+    }
+
     pub(crate) fn ingest_service_client() -> IngestServiceClient {
         let universe = quickwit_actors::Universe::new();
         let (ingest_service_mailbox, _) = universe.create_test_mailbox::<IngestApiService>();
@@ -864,7 +923,7 @@ mod tests {
                 );
                 assert_eq!(
                     headers["Access-Control-Allow-Headers"],
-                    "content-type,mcp-protocol-version"
+                    "authorization,content-type,mcp-protocol-version"
                 );
                 assert_eq!(headers.get("Access-Control-Max-Age"), None);
             }
@@ -884,7 +943,7 @@ mod tests {
         );
         request.headers_mut().insert(
             "Access-Control-Request-Headers",
-            HeaderValue::from_static("content-type,mcp-protocol-version"),
+            HeaderValue::from_static("authorization,content-type,mcp-protocol-version"),
         );
         request
     }

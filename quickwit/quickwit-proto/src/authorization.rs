@@ -80,6 +80,8 @@ impl_authorization!(RequestFamily::IndexRead =>
     // `PutKV`/`GetKV` store scroll contexts while serving a search request.
     PutKvRequest,
     GetKvRequest,
+    // The search job placer probes the load of the searchers while serving a search request.
+    GetLoadRequest,
 );
 
 impl_authorization!(RequestFamily::IndexWrite =>
@@ -132,5 +134,4 @@ impl_authorization!(RequestFamily::Cluster =>
     GetDebugInfoRequest,
     // Search
     ReportSplitsRequest,
-    GetLoadRequest,
 );

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::{BTreeMap, HashMap};
+use std::fmt;
 
 use anyhow::ensure;
 use serde::{Deserialize, Serialize};
@@ -23,7 +24,7 @@ const QW_AUTH_NODE_TOKEN: &str = "QW_AUTH_NODE_TOKEN";
 /// The `authorization` section of the node config. Authorization is disabled when it is absent.
 ///
 /// The keys and roles are validated when authorization is initialized at node startup.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthorizationConfig {
     /// Hex-encoded public key of the root key pair that signs every token.
@@ -38,6 +39,18 @@ pub struct AuthorizationConfig {
     /// `cluster`).
     #[serde(default)]
     pub roles: BTreeMap<String, Vec<String>>,
+}
+
+// The node token is a bearer credential: never print it (the node config is logged at startup).
+impl fmt::Debug for AuthorizationConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter
+            .debug_struct("AuthorizationConfig")
+            .field("root_public_key", &self.root_public_key)
+            .field("node_token", &"***redacted***")
+            .field("roles", &self.roles)
+            .finish()
+    }
 }
 
 impl AuthorizationConfig {
@@ -99,6 +112,17 @@ mod tests {
         AuthorizationConfig::default()
             .resolve(&HashMap::new())
             .unwrap_err();
+    }
+
+    #[test]
+    fn test_authorization_config_debug_redacts_node_token() {
+        let config = AuthorizationConfig {
+            node_token: "secret-node-token".to_string(),
+            ..Default::default()
+        };
+        let debug_str = format!("{config:?}");
+        assert!(!debug_str.contains("secret-node-token"));
+        assert!(debug_str.contains("***redacted***"));
     }
 
     #[test]

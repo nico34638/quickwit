@@ -486,17 +486,20 @@ fn start_shard_positions_service(
 ) {
     // We spawn a task here, because we need the ingester to be ready before spawning the
     // the `ShardPositionsService`. If we don't, all the events we emit too early will be dismissed.
-    tokio::spawn(async move {
-        if let Some(ingester) = &ingester_opt
-            && ingester
-                .wait_for_status(IngesterStatus::Ready, Duration::from_mins(5))
-                .await
-                .is_err()
-        {
-            warn!("ingester failed to reach ready status");
-        }
-        ShardPositionsService::spawn(&spawn_ctx, event_broker, cluster);
-    });
+    spawn_named_task(
+        async move {
+            if let Some(ingester) = &ingester_opt
+                && ingester
+                    .wait_for_status(IngesterStatus::Ready, Duration::from_mins(5))
+                    .await
+                    .is_err()
+            {
+                warn!("ingester failed to reach ready status");
+            }
+            ShardPositionsService::spawn(&spawn_ctx, event_broker, cluster);
+        },
+        "start_shard_positions_service",
+    );
 }
 
 /// Waits for an external shutdown signal or for the server supervisor to exit, then notifies all
@@ -596,6 +599,29 @@ pub async fn serve_quickwit(
     quickwit_authorize::init_authorization(authorization_settings_opt)
         .context("failed to initialize authorization")?;
 
+    // Node startup and the background tasks it spawns (which inherit the context) act on behalf
+    // of the node.
+    quickwit_authorize::with_node_authorization(serve_quickwit_with_node_authorization(
+        node_config,
+        runtimes_config,
+        metastore_resolver,
+        storage_resolver,
+        tcp_listener_resolver,
+        shutdown_signal,
+        env_filter_reload_fn,
+    ))
+    .await
+}
+
+async fn serve_quickwit_with_node_authorization(
+    node_config: NodeConfig,
+    runtimes_config: RuntimesConfig,
+    metastore_resolver: MetastoreResolver,
+    storage_resolver: StorageResolver,
+    tcp_listener_resolver: impl TcpListenerResolver,
+    shutdown_signal: BoxFutureInfaillible<()>,
+    env_filter_reload_fn: EnvFilterReloadFn,
+) -> anyhow::Result<HashMap<String, ActorExitStatus>> {
     let cluster = start_cluster_service(&node_config)
         .await
         .context("failed to start cluster service")?;
@@ -1031,19 +1057,22 @@ pub async fn serve_quickwit(
     );
 
     let shutdown_token = CancellationToken::new();
-    let shutdown_handle = tokio::spawn(shutdown_signal_handler(
-        shutdown_signal,
-        shutdown_token.clone(),
-        universe,
-        ingester_opt,
-        ingester_decommission_timeout,
-        compactor_service_opt,
-        compactor_decommission_timeout,
-        grpc_shutdown_trigger_tx,
-        rest_shutdown_trigger_tx,
-        health_shutdown_trigger_tx_opt,
-        cluster.clone(),
-    ));
+    let shutdown_handle = spawn_named_task(
+        shutdown_signal_handler(
+            shutdown_signal,
+            shutdown_token.clone(),
+            universe,
+            ingester_opt,
+            ingester_decommission_timeout,
+            compactor_service_opt,
+            compactor_decommission_timeout,
+            grpc_shutdown_trigger_tx,
+            rest_shutdown_trigger_tx,
+            health_shutdown_trigger_tx_opt,
+            cluster.clone(),
+        ),
+        "shutdown_signal_handler",
+    );
     let grpc_join_handle = async move {
         spawn_named_task(grpc_server, "grpc_server")
             .await

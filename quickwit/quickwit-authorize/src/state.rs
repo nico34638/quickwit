@@ -25,12 +25,24 @@ use crate::authorizer::RequestFamily;
 use crate::token::{ROOT_KEY_ALGORITHM, validate_datalog_string};
 
 /// Authorization settings, built from the `authorization` section of the node config.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct AuthorizationSettings {
     pub root_public_key_hex: String,
     pub node_token_base64: String,
     /// Role name -> request families granted to the role.
     pub roles: BTreeMap<String, Vec<String>>,
+}
+
+// The node token is a bearer credential: never print it.
+impl std::fmt::Debug for AuthorizationSettings {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter
+            .debug_struct("AuthorizationSettings")
+            .field("root_public_key_hex", &self.root_public_key_hex)
+            .field("node_token_base64", &"***redacted***")
+            .field("roles", &self.roles)
+            .finish()
+    }
 }
 
 pub(crate) struct EnabledState {

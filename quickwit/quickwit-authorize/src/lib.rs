@@ -21,8 +21,10 @@
 //! - REST requests carry a biscuit token in the `Authorization: Bearer <token>` header. The token
 //!   is validated and stored in the [`AUTHORIZATION_TOKEN`] inheritable task-local for the duration
 //!   of the request.
-//! - Generated gRPC clients forward the task-local token in the request metadata, or the node token
-//!   when there is none (background tasks such as indexing pipelines or the janitor).
+//! - Generated gRPC clients forward the task-local token in the request metadata. System tasks
+//!   (actors, background tasks) run with the node token, set explicitly with
+//!   [`with_node_authorization`]. A task without token in context is denied: there is no implicit
+//!   fallback on the node token.
 //! - Generated gRPC servers extract the token from the metadata and scope it again.
 //! - The [`AuthorizationLayer`] checks every request against the token using the request's
 //!   [`RequestFamily`] and the role rights from the node configuration.
@@ -37,7 +39,7 @@ mod token;
 pub use authorizer::{Authorization, RequestFamily, authorize_request};
 pub use context::{
     AUTHORIZATION_TOKEN, build_tonic_request_with_auth_token, execute_with_authorization,
-    extract_auth_token, inject_auth_token, spawn_inherit_auth_context,
+    extract_auth_token, inject_auth_token, spawn_inherit_auth_context, with_node_authorization,
 };
 pub use layer::{AuthorizationLayer, AuthorizationService};
 pub use rest_layer::{

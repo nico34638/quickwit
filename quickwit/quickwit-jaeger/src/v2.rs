@@ -149,49 +149,52 @@ impl TraceReader for JaegerService {
         let lookback_period_secs = self.lookback_period_secs;
         let query_list = request.into_inner().query;
 
-        tokio::task::spawn(async move {
-            for query_params in query_list {
-                let trace_id = match TraceId::try_from(query_params.trace_id) {
-                    Ok(id) => id,
-                    Err(error) => {
-                        let _ = tx
-                            .send(Err(Status::invalid_argument(error.to_string())))
-                            .await;
-                        return;
-                    }
-                };
+        quickwit_common::spawn_named_task(
+            async move {
+                for query_params in query_list {
+                    let trace_id = match TraceId::try_from(query_params.trace_id) {
+                        Ok(id) => id,
+                        Err(error) => {
+                            let _ = tx
+                                .send(Err(Status::invalid_argument(error.to_string())))
+                                .await;
+                            return;
+                        }
+                    };
 
-                let end = OffsetDateTime::now_utc().unix_timestamp();
-                let search_window = (end - lookback_period_secs)..=end;
+                    let end = OffsetDateTime::now_utc().unix_timestamp();
+                    let search_window = (end - lookback_period_secs)..=end;
 
-                let otel_spans = match stream_otel_spans_impl(
-                    search_service.clone(),
-                    max_fetch_spans,
-                    &[trace_id],
-                    search_window,
-                    "get_traces_v2",
-                    request_start,
-                    index_id_patterns.clone(),
-                    false,
-                )
-                .await
-                {
-                    Ok(spans) => spans,
-                    Err(e) => {
-                        let _ = tx.send(Err(e)).await;
-                        return;
-                    }
-                };
-
-                if tx
-                    .send(Ok(qw_spans_to_otel_traces_data(otel_spans)))
+                    let otel_spans = match stream_otel_spans_impl(
+                        search_service.clone(),
+                        max_fetch_spans,
+                        &[trace_id],
+                        search_window,
+                        "get_traces_v2",
+                        request_start,
+                        index_id_patterns.clone(),
+                        false,
+                    )
                     .await
-                    .is_err()
-                {
-                    return;
+                    {
+                        Ok(spans) => spans,
+                        Err(e) => {
+                            let _ = tx.send(Err(e)).await;
+                            return;
+                        }
+                    };
+
+                    if tx
+                        .send(Ok(qw_spans_to_otel_traces_data(otel_spans)))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
                 }
-            }
-        });
+            },
+            "jaeger_get_traces",
+        );
 
         Ok(Response::new(ReceiverStream::new(rx)))
     }
@@ -227,45 +230,48 @@ impl TraceReader for JaegerService {
         let search_service = self.search_service.clone();
         let max_fetch_spans = self.max_fetch_spans;
 
-        tokio::task::spawn(async move {
-            let all_spans = match stream_otel_spans_impl(
-                search_service,
-                max_fetch_spans,
-                &trace_ids,
-                search_window,
-                "find_traces_v2",
-                request_start,
-                index_id_patterns,
-                false,
-            )
-            .await
-            {
-                Ok(spans) => spans,
-                Err(e) => {
-                    let _ = tx.send(Err(e)).await;
-                    return;
-                }
-            };
-
-            // Group by trace_id and send each trace
-            let mut spans_by_trace: HashMap<Vec<u8>, Vec<QwSpan>> = HashMap::new();
-            for span in all_spans {
-                spans_by_trace
-                    .entry(span.trace_id.to_vec())
-                    .or_default()
-                    .push(span);
-            }
-
-            for spans in spans_by_trace.into_values() {
-                if tx
-                    .send(Ok(qw_spans_to_otel_traces_data(spans)))
-                    .await
-                    .is_err()
+        quickwit_common::spawn_named_task(
+            async move {
+                let all_spans = match stream_otel_spans_impl(
+                    search_service,
+                    max_fetch_spans,
+                    &trace_ids,
+                    search_window,
+                    "find_traces_v2",
+                    request_start,
+                    index_id_patterns,
+                    false,
+                )
+                .await
                 {
-                    return;
+                    Ok(spans) => spans,
+                    Err(e) => {
+                        let _ = tx.send(Err(e)).await;
+                        return;
+                    }
+                };
+
+                // Group by trace_id and send each trace
+                let mut spans_by_trace: HashMap<Vec<u8>, Vec<QwSpan>> = HashMap::new();
+                for span in all_spans {
+                    spans_by_trace
+                        .entry(span.trace_id.to_vec())
+                        .or_default()
+                        .push(span);
                 }
-            }
-        });
+
+                for spans in spans_by_trace.into_values() {
+                    if tx
+                        .send(Ok(qw_spans_to_otel_traces_data(spans)))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            },
+            "jaeger_find_traces",
+        );
 
         Ok(Response::new(ReceiverStream::new(rx)))
     }

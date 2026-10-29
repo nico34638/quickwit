@@ -123,7 +123,7 @@ pub struct SearchClientInterceptor;
 impl tonic::service::Interceptor for SearchClientInterceptor {
     fn call(&mut self, mut request: Request<()>) -> Result<Request<()>, tonic::Status> {
         inject_current_context(request.metadata_mut());
-        quickwit_authorize::inject_auth_token(request.metadata_mut());
+        quickwit_authorize::inject_auth_token(request.metadata_mut(), "search");
         Ok(request)
     }
 }

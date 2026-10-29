@@ -194,11 +194,13 @@ impl<E: Event> EventSubscription<E> {
                 EVENT_SUBSCRIPTION_CALLBACK_TIMEOUT.as_millis()
             );
         });
-        tokio::task::spawn(async move {
+        // Events report changes of the state of the node or the cluster: subscribers react to them
+        // on behalf of the node, whoever published them.
+        tokio::task::spawn(quickwit_authorize::with_node_authorization(async move {
             subscriber.lock().await.handle_event(event).await;
             // The callback has terminated, let's abort the timeout task.
             log_timeout_task_handle.abort();
-        });
+        }));
     }
 
     /// Spawns a task to run the given subscription.
@@ -222,7 +224,8 @@ impl<E: Event> EventSubscription<E> {
                 );
             }
         };
-        tokio::task::spawn(fut);
+        // See `trigger_just_log_on_timeout`.
+        tokio::task::spawn(quickwit_authorize::with_node_authorization(fut));
     }
 }
 

@@ -20,8 +20,9 @@ use tokio::task::futures::TaskLocalFuture;
 use tokio_inherit_task_local::TaskLocalInheritableTable;
 use tower::{Layer, Service};
 
+use crate::authorizer::authorize_with_optional_family;
 use crate::state::enabled_state;
-use crate::{AuthorizationError, AuthorizationToken, execute_with_authorization};
+use crate::{AuthorizationError, AuthorizationToken, RequestFamily, execute_with_authorization};
 
 /// Extracts the token from the `Authorization` header of HTTP requests and scopes it for the
 /// duration of the request.
@@ -56,11 +57,22 @@ fn parse_authorization_header(
     Ok(Some(token))
 }
 
-/// Checks that the `Authorization` header holds a valid token when authorization is enabled.
+/// Checks the `Authorization` header of a REST request when authorization is enabled: the token
+/// must be signed by the root key, pass its own checks (expiration), and, if `request_family_opt`
+/// is set, grant that family.
+///
+/// Routes whose handlers call services through gRPC clients are also checked by the
+/// `AuthorizationLayer` of each service; routes served by the REST handler alone (cluster state,
+/// node config, developer API) must pass their request family here.
 pub fn check_rest_authorization_header(
     header_value_opt: Option<&str>,
+    request_family_opt: Option<RequestFamily>,
 ) -> Result<(), AuthorizationError> {
-    parse_authorization_header(header_value_opt).map(|_| ())
+    let Some(token) = parse_authorization_header(header_value_opt)? else {
+        return Ok(());
+    };
+    let state = enabled_state().expect("a token is only parsed when authorization is enabled");
+    authorize_with_optional_family(state, request_family_opt, &token)
 }
 
 impl<B, S> Service<Request<B>> for AuthorizationTokenExtractionService<S>

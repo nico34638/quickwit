@@ -85,11 +85,15 @@ fn fire_and_forget(
     fut: impl Future<Output = ()> + Send + 'static,
     operation: impl std::fmt::Display + Send + 'static,
 ) {
-    tokio::spawn(async move {
-        if let Err(_timeout_elapsed) = tokio::time::timeout(FIRE_AND_FORGET_TIMEOUT, fut).await {
-            error!(%operation, "timeout elapsed");
-        }
-    });
+    quickwit_common::spawn_named_task(
+        async move {
+            if let Err(_timeout_elapsed) = tokio::time::timeout(FIRE_AND_FORGET_TIMEOUT, fut).await
+            {
+                error!(%operation, "timeout elapsed");
+            }
+        },
+        "fire_and_forget",
+    );
 }
 
 type SourceShardCount = HashMap<SourceUid, usize>;
@@ -1205,7 +1209,10 @@ impl IngestController {
             };
             let _ = mailbox_clone.send_message(callback).await;
         };
-        tokio::spawn(close_shards_and_send_callback_fut);
+        quickwit_common::spawn_named_task(
+            close_shards_and_send_callback_fut,
+            "rebalance_close_shards",
+        );
 
         if num_opened_shards > 0 {
             info!("rebalance opened {num_opened_shards} new shards");

@@ -601,36 +601,39 @@ impl IndexingScheduler {
 
             let notify_on_drop = notify_on_drop.clone();
             let indexing_plan_id = indexing_plan_id.clone();
-            tokio::spawn(async move {
-                let client = indexer.client.clone();
-                let apply_plan_fut = client.apply_indexing_plan(ApplyIndexingPlanRequest {
-                    indexing_tasks,
-                    indexing_plan_id,
-                });
-                let apply_result = match apply_deadline {
-                    Some(timeout) => tokio::time::timeout(timeout, apply_plan_fut).await,
-                    None => Ok(apply_plan_fut.await),
-                };
-                match apply_result {
-                    Ok(Ok(_)) => {}
-                    Ok(Err(error)) => {
-                        warn!(
-                            %error,
-                            remote_node_id=%indexer.node_id,
-                            generation_id=%indexer.generation_id,
-                            "failed to apply indexing plan to indexer"
-                        );
+            quickwit_common::spawn_named_task(
+                async move {
+                    let client = indexer.client.clone();
+                    let apply_plan_fut = client.apply_indexing_plan(ApplyIndexingPlanRequest {
+                        indexing_tasks,
+                        indexing_plan_id,
+                    });
+                    let apply_result = match apply_deadline {
+                        Some(timeout) => tokio::time::timeout(timeout, apply_plan_fut).await,
+                        None => Ok(apply_plan_fut.await),
+                    };
+                    match apply_result {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(error)) => {
+                            warn!(
+                                %error,
+                                remote_node_id=%indexer.node_id,
+                                generation_id=%indexer.generation_id,
+                                "failed to apply indexing plan to indexer"
+                            );
+                        }
+                        Err(_elapsed) => {
+                            warn!(
+                                remote_node_id=%indexer.node_id,
+                                generation_id=%indexer.generation_id,
+                                "timed out applying indexing plan to indexer"
+                            );
+                        }
                     }
-                    Err(_elapsed) => {
-                        warn!(
-                            remote_node_id=%indexer.node_id,
-                            generation_id=%indexer.generation_id,
-                            "timed out applying indexing plan to indexer"
-                        );
-                    }
-                }
-                drop(notify_on_drop);
-            });
+                    drop(notify_on_drop);
+                },
+                "apply_indexing_plan",
+            );
         }
         self.state.num_applied_physical_indexing_plan += 1;
         self.state.last_applied_plan_timestamp = Some(Instant::now());
