@@ -486,6 +486,25 @@ impl ClusterSandbox {
         .build()
     }
 
+    /// Returns the base URL of the REST API of one of the nodes that runs the specified service,
+    /// for the requests not covered by the REST client.
+    pub fn rest_base_url(&self, service: QuickwitService) -> Url {
+        let node_config = self.find_node_for_service(service);
+        let tls = node_config.rest_config.tls_config.is_some();
+        transport_url(node_config.rest_config.listen_addr, tls)
+    }
+
+    /// Returns a raw gRPC client of the search service of a searcher. Unlike
+    /// `quickwit_search::SearchServiceClient`, it does not add any authorization token.
+    pub fn search_grpc_client(
+        &self,
+    ) -> quickwit_proto::search::search_service_client::SearchServiceClient<tonic::transport::Channel>
+    {
+        quickwit_proto::search::search_service_client::SearchServiceClient::new(
+            self.channel(QuickwitService::Searcher),
+        )
+    }
+
     pub fn jaeger_client(&self) -> SpanReaderPluginClient<tonic::transport::Channel> {
         SpanReaderPluginClient::new(self.channel(QuickwitService::Searcher))
     }

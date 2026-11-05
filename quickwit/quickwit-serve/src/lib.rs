@@ -14,6 +14,7 @@
 
 #![recursion_limit = "256"]
 
+mod auth_api;
 mod build_info;
 mod cluster_api;
 mod decompression;
@@ -30,6 +31,7 @@ mod jaeger_api;
 mod load_shield;
 mod mcp_api;
 mod metastore;
+mod metastore_authorization;
 mod metrics;
 mod metrics_api;
 mod node_info_handler;
@@ -133,6 +135,7 @@ use tower::timeout::Timeout;
 use tracing::{debug, error, info, warn};
 use warp::{Filter, Rejection};
 
+use crate::auth_api::TokenExchange;
 pub use crate::build_info::{BuildInfo, RuntimeInfo};
 pub use crate::index_api::{ListSplitsQueryParams, ListSplitsResponse};
 pub use crate::ingest_api::{RestIngestResponse, RestParseFailure};
@@ -203,6 +206,9 @@ struct QuickwitServices {
     /// It is only used to serve the rest API calls and will only execute
     /// the root requests.
     pub search_service: Arc<dyn SearchService>,
+
+    /// Exchange of JWTs for Quickwit tokens, when this node serves it.
+    pub token_exchange_opt: Option<Arc<TokenExchange>>,
 
     pub env_filter_reload_fn: EnvFilterReloadFn,
 
@@ -593,7 +599,21 @@ pub async fn serve_quickwit(
                 |authorization_config| quickwit_authorize::AuthorizationSettings {
                     root_public_key_hex: authorization_config.root_public_key.clone(),
                     node_token_base64: authorization_config.node_token.clone(),
-                    roles: authorization_config.roles.clone(),
+                    roles: authorization_config
+                        .roles
+                        .iter()
+                        .map(|(role, role_config)| {
+                            let grants = role_config
+                                .grants()
+                                .into_iter()
+                                .map(|grant| quickwit_authorize::RoleGrantSettings {
+                                    rights: grant.rights,
+                                    indexes: grant.indexes,
+                                })
+                                .collect();
+                            (role.clone(), grants)
+                        })
+                        .collect(),
                 },
             );
     quickwit_authorize::init_authorization(authorization_settings_opt)
@@ -947,6 +967,13 @@ async fn serve_quickwit_with_node_authorization(
         None
     };
 
+    let token_exchange_opt = match &node_config.authorization_config {
+        Some(authorization_config) => TokenExchange::try_new(authorization_config)
+            .context("failed to initialize JWT token exchange")?
+            .map(Arc::new),
+        None => None,
+    };
+
     let grpc_listen_addr = node_config.grpc_listen_addr;
     let rest_listen_addr = node_config.rest_config.listen_addr;
     let ingester_decommission_timeout = node_config.ingest_api_config.decommission_timeout();
@@ -973,6 +1000,7 @@ async fn serve_quickwit_with_node_authorization(
         otlp_logs_service_opt,
         otlp_traces_service_opt,
         search_service,
+        token_exchange_opt,
         env_filter_reload_fn,
     });
     // Setup and start gRPC server.

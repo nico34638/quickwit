@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use quickwit_authorize::{Authorization, RequestFamily};
+use quickwit_authorize::{Authorization, IndexScope, RequestFamily};
 
 use crate::{FetchRequest, IngestRequest, TailRequest};
 
@@ -20,16 +20,33 @@ impl Authorization for IngestRequest {
     fn request_family(&self) -> RequestFamily {
         RequestFamily::IndexWrite
     }
+
+    fn index_scope(&self) -> IndexScope {
+        IndexScope::Indexes(
+            self.doc_batches
+                .iter()
+                .map(|doc_batch| doc_batch.index_id.clone())
+                .collect(),
+        )
+    }
 }
 
 impl Authorization for FetchRequest {
     fn request_family(&self) -> RequestFamily {
         RequestFamily::IndexRead
     }
+
+    fn index_scope(&self) -> IndexScope {
+        IndexScope::Indexes(vec![self.index_id.clone()])
+    }
 }
 
 impl Authorization for TailRequest {
     fn request_family(&self) -> RequestFamily {
         RequestFamily::IndexRead
+    }
+
+    fn index_scope(&self) -> IndexScope {
+        IndexScope::Indexes(vec![self.index_id.clone()])
     }
 }

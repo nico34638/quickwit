@@ -122,6 +122,7 @@ indexmap = { version = "2.14", features = ["serde"] }
 indicatif = "0.18"
 inventory = "0.3"
 itertools = "0.15"
+jsonwebtoken = { version = "9.3", default-features = false }
 lambda_runtime = "1.4"
 json_comments = "0.2"
 libz-sys = "1.1"

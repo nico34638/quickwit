@@ -18,6 +18,7 @@ import {
   FullBoxContainer,
   ViewUnderAppBarBox,
 } from "../components/LayoutUtils";
+import { authorizationHeaders } from "../services/auth";
 
 function ApiView() {
   return (
@@ -27,6 +28,14 @@ function ApiView() {
           layout="BaseLayout"
           defaultModelsExpandDepth={-1}
           url="/openapi.json"
+          requestInterceptor={(request) => {
+            // The requests sent from the playground carry the token of the UI.
+            request["headers"] = {
+              ...request["headers"],
+              ...authorizationHeaders(),
+            };
+            return request;
+          }}
         />
       </FullBoxContainer>
     </ViewUnderAppBarBox>

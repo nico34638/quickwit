@@ -36,7 +36,7 @@ use quickwit_proto::types::{AvailabilityZone, NodeId};
 use serde::{Deserialize, Deserializer, Serialize};
 use tracing::{info, warn};
 
-pub use self::authorization::AuthorizationConfig;
+pub use self::authorization::{AuthorizationConfig, JwtConfig, RoleConfig, RoleGrantConfig};
 use crate::docs_clustering::DocsClusteringConfig;
 use crate::node_config::serialize::load_node_config_with_env;
 use crate::serde_utils::HumanDuration;

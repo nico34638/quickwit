@@ -13,23 +13,29 @@
 // limitations under the License.
 
 use std::str::FromStr;
+use std::time::Duration;
 
 use anyhow::bail;
-use biscuit_auth::{Authorizer, AuthorizerBuilder};
+use biscuit_auth::{AuthorizerBuilder, AuthorizerLimits};
 use tracing::debug;
 
 use crate::context::current_token;
+use crate::policy::IndexScope;
 use crate::state::{EnabledState, enabled_state};
 use crate::{AuthorizationError, AuthorizationToken};
 
 /// Coarse-grained family of operations a request belongs to.
-#[derive(Default, Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub enum RequestFamily {
-    #[default]
     IndexRead,
     IndexWrite,
     IndexAdmin,
+    /// Operations of the cluster operators: cluster state, node configuration, debug info.
     Cluster,
+    /// Requests exchanged between the nodes of the cluster: splits publication, shard
+    /// management, indexing plans, leaf searches, etc. Only node tokens are granted this family:
+    /// it cannot be granted to a role, whatever its rights.
+    Internal,
 }
 
 impl RequestFamily {
@@ -39,10 +45,12 @@ impl RequestFamily {
             Self::IndexWrite => "index:write",
             Self::IndexAdmin => "index:admin",
             Self::Cluster => "cluster",
+            Self::Internal => "internal",
         }
     }
 }
 
+/// Parses the rights that can be granted to a role: [`RequestFamily::Internal`] is not one of them.
 impl FromStr for RequestFamily {
     type Err = anyhow::Error;
 
@@ -60,72 +68,132 @@ impl FromStr for RequestFamily {
     }
 }
 
+/// Run limits of the datalog evaluation of a token.
+///
+/// The default limits of biscuit allow 1ms of evaluation, which a node under CPU pressure (a
+/// searcher, typically) exceeds now and then: the request would then be denied. The number of
+/// facts and iterations stay bounded: tokens can be attenuated by their holder, who controls the
+/// datalog of the appended blocks.
+const AUTHORIZER_LIMITS: AuthorizerLimits = AuthorizerLimits {
+    max_facts: 1_000,
+    max_iterations: 100,
+    max_time: Duration::from_millis(100),
+};
+
+/// Returns the authorizer template shared by all the evaluations: it accepts any token whose own
+/// checks (expiration, attenuation blocks) pass.
+pub(crate) fn authorizer_template() -> anyhow::Result<AuthorizerBuilder> {
+    let authorizer_builder = AuthorizerBuilder::new()
+        .code("allow if true;")?
+        .set_limits(AUTHORIZER_LIMITS);
+    Ok(authorizer_builder)
+}
+
 /// Implemented by every request type that goes through an [`crate::AuthorizationLayer`].
 pub trait Authorization {
     fn request_family(&self) -> RequestFamily;
+
+    /// The indexes the request applies to. Hidden contract: a request whose index IDs cannot be
+    /// extracted must return [`IndexScope::AllIndexes`], never a narrower scope.
+    fn index_scope(&self) -> IndexScope;
 }
 
-/// Without a request family, only the checks of the token itself (expiration) are evaluated.
-fn build_authorizer(
+/// Who a verified token was issued to.
+#[derive(Debug)]
+pub(crate) enum Principal {
+    /// A node of the cluster (`service(...)` facts): it is granted every right.
+    Node,
+    /// A user with the `user(...)` and `role(...)` facts of the token.
+    User {
+        user_opt: Option<String>,
+        roles: Vec<String>,
+    },
+}
+
+/// Runs the checks of the token itself (expiration) and reads its identity facts.
+///
+/// Identity facts are only read from the authority block, signed by the root key: blocks
+/// appended by the token holder cannot grant roles.
+pub(crate) fn authenticate(
     state: &EnabledState,
-    request_family_opt: Option<RequestFamily>,
     token: &AuthorizationToken,
-) -> Result<Authorizer, AuthorizationError> {
-    // A `check all` without any matching fact fails, so the check is only added with a request.
-    let request_datalog = match request_family_opt {
-        Some(request_family) => format!(
-            "request(\"{}\");\ncheck all request($request), right($request);",
-            request_family.as_str()
-        ),
-        None => String::new(),
-    };
-    // Node tokens (`service(...)` facts) are granted every right: nodes act on behalf of
-    // background tasks and of users whose rights were already checked at the edge.
-    let datalog = format!(
-        r#"
-        {request_datalog}
-
-        right($request) <- role($role), role_right($role, $request);
-        right($request) <- service($service), request($request);
-
-        {}
-
-        allow if true;
-        "#,
-        state.role_rights_datalog
-    );
-    let authorizer = AuthorizerBuilder::new()
-        .code(datalog)
-        .map_err(|_| AuthorizationError::PermissionDenied)?
+) -> Result<Principal, AuthorizationError> {
+    let mut authorizer = state
+        .authorizer_template
+        .clone()
         .time()
         .build(token.biscuit())
-        .map_err(|_| AuthorizationError::InvalidToken)?;
-    Ok(authorizer)
+        .map_err(|error| {
+            debug!(%error, "failed to load token in authorizer");
+            AuthorizationError::InvalidToken
+        })?;
+    authorizer.authorize().map_err(|error| {
+        debug!(%error, "token checks failed");
+        AuthorizationError::ExpiredToken
+    })?;
+    // The checks passed: a failure from now on comes from the evaluation itself (run limits).
+    let services: Vec<(String,)> = authorizer
+        .query("data($service) <- service($service)")
+        .map_err(|error| {
+            debug!(%error, "failed to query token services");
+            AuthorizationError::PermissionDenied
+        })?;
+    if !services.is_empty() {
+        return Ok(Principal::Node);
+    }
+    let roles: Vec<(String,)> =
+        authorizer
+            .query("data($role) <- role($role)")
+            .map_err(|error| {
+                debug!(%error, "failed to query token roles");
+                AuthorizationError::PermissionDenied
+            })?;
+    // The order of the query results is not specified.
+    let mut roles: Vec<String> = roles.into_iter().map(|(role,)| role).collect();
+    roles.sort();
+    let users: Vec<(String,)> =
+        authorizer
+            .query("data($user) <- user($user)")
+            .map_err(|error| {
+                debug!(%error, "failed to query token user");
+                AuthorizationError::PermissionDenied
+            })?;
+    let user_opt = users.into_iter().next().map(|(user,)| user);
+    Ok(Principal::User { user_opt, roles })
 }
 
 pub(crate) fn authorize_with_token(
     state: &EnabledState,
     request_family: RequestFamily,
+    index_scope: &IndexScope,
     token: &AuthorizationToken,
 ) -> Result<(), AuthorizationError> {
-    authorize_with_optional_family(state, Some(request_family), token)
+    let Principal::User { roles, .. } = authenticate(state, token)? else {
+        return Ok(());
+    };
+    if state.policy.is_allowed(&roles, request_family, index_scope) {
+        return Ok(());
+    }
+    debug!(
+        request_family = request_family.as_str(),
+        index_scope = ?index_scope,
+        "permission denied"
+    );
+    Err(AuthorizationError::PermissionDenied)
 }
 
+/// Without a request family, only the checks of the token itself (expiration) are evaluated.
 pub(crate) fn authorize_with_optional_family(
     state: &EnabledState,
     request_family_opt: Option<RequestFamily>,
     token: &AuthorizationToken,
 ) -> Result<(), AuthorizationError> {
-    let mut authorizer = build_authorizer(state, request_family_opt, token)?;
-    authorizer.authorize().map_err(|error| {
-        debug!(
-            request_family = request_family_opt.map(|request_family| request_family.as_str()),
-            error = %error,
-            "permission denied"
-        );
-        AuthorizationError::PermissionDenied
-    })?;
-    Ok(())
+    match request_family_opt {
+        Some(request_family) => {
+            authorize_with_token(state, request_family, &IndexScope::NoIndex, token)
+        }
+        None => authenticate(state, token).map(|_| ()),
+    }
 }
 
 /// Checks the request against the token of the current task. Fails if there is none: see
@@ -133,13 +201,84 @@ pub(crate) fn authorize_with_optional_family(
 ///
 /// Always succeeds when authorization is disabled.
 pub fn authorize_request<R: Authorization>(request: &R) -> Result<(), AuthorizationError> {
+    authorize_operation(
+        std::any::type_name::<R>(),
+        request.request_family(),
+        &request.index_scope(),
+    )
+}
+
+/// Checks that the token of the current task grants `request_family` on `index_scope`, for
+/// operations that are not a request going through an [`crate::AuthorizationLayer`] (for instance,
+/// resuming a scroll whose indexes are only known once its context is loaded). `operation` names
+/// the operation in the logs.
+///
+/// Always succeeds when authorization is disabled.
+pub fn authorize_operation(
+    operation: &str,
+    request_family: RequestFamily,
+    index_scope: &IndexScope,
+) -> Result<(), AuthorizationError> {
     let Some(state) = enabled_state() else {
         return Ok(());
     };
-    let Some(token) = current_token(std::any::type_name::<R>()) else {
+    let Some(token) = current_token(operation) else {
         return Err(AuthorizationError::AuthorizationTokenMissing);
     };
-    authorize_with_token(state, request.request_family(), &token)
+    authorize_with_token(state, request_family, index_scope, &token)
+}
+
+/// Decides which indexes the current task may see in a listing.
+pub enum IndexFilter {
+    /// Authorization is disabled, or the current task runs on behalf of the node.
+    AllowAll,
+    /// The current task runs on behalf of a user with these roles.
+    Roles {
+        roles: Vec<String>,
+        request_family: RequestFamily,
+    },
+    /// The current task has no valid token.
+    DenyAll,
+}
+
+impl IndexFilter {
+    pub fn is_index_allowed(&self, index_id: &str) -> bool {
+        match self {
+            IndexFilter::AllowAll => true,
+            IndexFilter::Roles {
+                roles,
+                request_family,
+            } => match enabled_state() {
+                Some(state) => state
+                    .policy
+                    .is_index_allowed(roles, *request_family, index_id),
+                None => true,
+            },
+            IndexFilter::DenyAll => false,
+        }
+    }
+
+    pub fn is_allow_all(&self) -> bool {
+        matches!(self, IndexFilter::AllowAll)
+    }
+}
+
+/// Returns the filter to apply to the indexes listed for the current task, for `request_family`.
+pub fn current_index_filter(request_family: RequestFamily) -> IndexFilter {
+    let Some(state) = enabled_state() else {
+        return IndexFilter::AllowAll;
+    };
+    let Some(token) = current_token("index listing") else {
+        return IndexFilter::DenyAll;
+    };
+    match authenticate(state, &token) {
+        Ok(Principal::Node) => IndexFilter::AllowAll,
+        Ok(Principal::User { roles, .. }) => IndexFilter::Roles {
+            roles,
+            request_family,
+        },
+        Err(_) => IndexFilter::DenyAll,
+    }
 }
 
 #[cfg(test)]
@@ -149,6 +288,7 @@ mod tests {
     use biscuit_auth::PublicKey;
 
     use super::*;
+    use crate::policy::RoleGrantSettings;
     use crate::state::build_enabled_state_for_tests;
     use crate::{AuthorizationSettings, UserTokenSpec, generate_root_key_pair, generate_token};
 
@@ -163,15 +303,24 @@ mod tests {
         )
         .unwrap();
         let mut roles = BTreeMap::new();
-        roles.insert("reader".to_string(), vec!["index:read".to_string()]);
+        roles.insert(
+            "reader".to_string(),
+            vec![RoleGrantSettings {
+                rights: vec!["index:read".to_string()],
+                indexes: vec!["*".to_string()],
+            }],
+        );
         roles.insert(
             "admin".to_string(),
-            vec![
-                "index:read".to_string(),
-                "index:write".to_string(),
-                "index:admin".to_string(),
-                "cluster".to_string(),
-            ],
+            vec![RoleGrantSettings {
+                rights: vec![
+                    "index:read".to_string(),
+                    "index:write".to_string(),
+                    "index:admin".to_string(),
+                    "cluster".to_string(),
+                ],
+                indexes: vec!["*".to_string()],
+            }],
         );
         let settings = AuthorizationSettings {
             root_public_key_hex: public_key_hex,
@@ -211,20 +360,69 @@ mod tests {
             );
         }
         RequestFamily::from_str("index:delete").unwrap_err();
+        // The internal requests cannot be granted to a role.
+        RequestFamily::from_str(RequestFamily::Internal.as_str()).unwrap_err();
+    }
+
+    #[test]
+    fn test_internal_requests_are_reserved_to_nodes() {
+        let (private_key_hex, state) = make_state();
+        let admin = make_user_token(&private_key_hex, state.root_public_key, &["admin"], None);
+        assert_eq!(
+            authorize_with_token(
+                &state,
+                RequestFamily::Internal,
+                &IndexScope::NoIndex,
+                &admin
+            )
+            .unwrap_err(),
+            AuthorizationError::PermissionDenied
+        );
+        authorize_with_token(
+            &state,
+            RequestFamily::Internal,
+            &IndexScope::NoIndex,
+            &state.node_token,
+        )
+        .unwrap();
     }
 
     #[test]
     fn test_role_rights() {
         let (private_key_hex, state) = make_state();
         let reader = make_user_token(&private_key_hex, state.root_public_key, &["reader"], None);
-        authorize_with_token(&state, RequestFamily::IndexRead, &reader).unwrap();
+        authorize_with_token(
+            &state,
+            RequestFamily::IndexRead,
+            &IndexScope::AnyIndex,
+            &reader,
+        )
+        .unwrap();
         assert_eq!(
-            authorize_with_token(&state, RequestFamily::IndexAdmin, &reader).unwrap_err(),
+            authorize_with_token(
+                &state,
+                RequestFamily::IndexAdmin,
+                &IndexScope::AnyIndex,
+                &reader
+            )
+            .unwrap_err(),
             AuthorizationError::PermissionDenied
         );
         let admin = make_user_token(&private_key_hex, state.root_public_key, &["admin"], None);
-        authorize_with_token(&state, RequestFamily::IndexAdmin, &admin).unwrap();
-        authorize_with_token(&state, RequestFamily::Cluster, &admin).unwrap();
+        authorize_with_token(
+            &state,
+            RequestFamily::IndexAdmin,
+            &IndexScope::AnyIndex,
+            &admin,
+        )
+        .unwrap();
+        authorize_with_token(
+            &state,
+            RequestFamily::Cluster,
+            &IndexScope::AnyIndex,
+            &admin,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -232,7 +430,13 @@ mod tests {
         let (private_key_hex, state) = make_state();
         let token = make_user_token(&private_key_hex, state.root_public_key, &["intern"], None);
         assert_eq!(
-            authorize_with_token(&state, RequestFamily::IndexRead, &token).unwrap_err(),
+            authorize_with_token(
+                &state,
+                RequestFamily::IndexRead,
+                &IndexScope::AnyIndex,
+                &token
+            )
+            .unwrap_err(),
             AuthorizationError::PermissionDenied
         );
     }
@@ -240,8 +444,20 @@ mod tests {
     #[test]
     fn test_node_token_has_all_rights() {
         let (_, state) = make_state();
-        authorize_with_token(&state, RequestFamily::IndexAdmin, &state.node_token).unwrap();
-        authorize_with_token(&state, RequestFamily::Cluster, &state.node_token).unwrap();
+        authorize_with_token(
+            &state,
+            RequestFamily::IndexAdmin,
+            &IndexScope::AnyIndex,
+            &state.node_token,
+        )
+        .unwrap();
+        authorize_with_token(
+            &state,
+            RequestFamily::Cluster,
+            &IndexScope::AnyIndex,
+            &state.node_token,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -255,8 +471,14 @@ mod tests {
         );
         std::thread::sleep(std::time::Duration::from_secs(1));
         assert_eq!(
-            authorize_with_token(&state, RequestFamily::IndexRead, &token).unwrap_err(),
-            AuthorizationError::PermissionDenied
+            authorize_with_token(
+                &state,
+                RequestFamily::IndexRead,
+                &IndexScope::AnyIndex,
+                &token
+            )
+            .unwrap_err(),
+            AuthorizationError::ExpiredToken
         );
     }
 
@@ -276,7 +498,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_secs(1));
         assert_eq!(
             authorize_with_optional_family(&state, None, &expired).unwrap_err(),
-            AuthorizationError::PermissionDenied
+            AuthorizationError::ExpiredToken
         );
     }
 
@@ -285,6 +507,10 @@ mod tests {
     impl Authorization for ReadRequest {
         fn request_family(&self) -> RequestFamily {
             RequestFamily::IndexRead
+        }
+
+        fn index_scope(&self) -> IndexScope {
+            IndexScope::AnyIndex
         }
     }
 

@@ -45,6 +45,7 @@ use warp::hyper::http::HeaderValue;
 use warp::hyper::{Method, StatusCode, http};
 use warp::{Filter, Rejection, Reply, redirect};
 
+use crate::auth_api::{auth_token_handler, whoami_handler};
 use crate::cluster_api::cluster_handler;
 use crate::decompression::{CorruptedData, UnsupportedEncoding};
 use crate::delete_task_api::delete_task_api_handlers;
@@ -105,6 +106,18 @@ const CLUSTER_REST_PATH_PREFIXES: &[&str] = &[
     "/api/developer/",
 ];
 
+/// Path prefixes of the routes that require a valid token when authorization is enabled. The other
+/// routes (UI, API docs, health checks, metrics) are public: the authorization filter must let them
+/// through, otherwise its rejection would take precedence over theirs (a missing UI asset would be
+/// reported as unauthenticated instead of not found).
+const AUTHORIZED_REST_PATH_PREFIXES: &[&str] = &["/api/", "/mcp"];
+
+fn requires_authorization_token(path: &str) -> bool {
+    AUTHORIZED_REST_PATH_PREFIXES
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
+}
+
 /// Returns the request family checked at the REST edge for `path`, if any.
 fn rest_request_family(path: &str) -> Option<quickwit_authorize::RequestFamily> {
     CLUSTER_REST_PATH_PREFIXES
@@ -113,9 +126,9 @@ fn rest_request_family(path: &str) -> Option<quickwit_authorize::RequestFamily> 
         .then_some(quickwit_authorize::RequestFamily::Cluster)
 }
 
-/// Rejects requests without a valid authorization token (bad signature or expired), and requests
-/// to the routes of `CLUSTER_REST_PATH_PREFIXES` whose token lacks the `cluster` right. Always
-/// passes when authorization is disabled.
+/// Rejects requests to the routes of `AUTHORIZED_REST_PATH_PREFIXES` without a valid authorization
+/// token (bad signature or expired), and requests to the routes of `CLUSTER_REST_PATH_PREFIXES`
+/// whose token lacks the `cluster` right. Always passes when authorization is disabled.
 ///
 /// The token itself is scoped for the duration of the request by the
 /// `AuthorizationTokenExtractionLayer`. The other routes are checked by the `AuthorizationLayer`
@@ -127,6 +140,9 @@ fn require_authorization() -> impl Filter<Extract = (), Error = Rejection> + Clo
         ))
         .and_then(
             |full_path: warp::path::FullPath, header_value_opt: Option<String>| async move {
+                if !requires_authorization_token(full_path.as_str()) {
+                    return Ok(());
+                }
                 let request_family_opt = rest_request_family(full_path.as_str());
                 quickwit_authorize::check_rest_authorization_header(
                     header_value_opt.as_deref(),
@@ -271,8 +287,13 @@ pub(crate) async fn start_rest_server(
         .and(api_v1_root_route.or(mcp_route).or(developer_routes))
         .boxed();
 
+    // `/api/v1/auth/token` route: its `Authorization` header carries a JWT, not a Quickwit token,
+    // so it must be matched before the authorized routes.
+    let auth_token_route = auth_token_handler(quickwit_services.token_exchange_opt.clone()).boxed();
+
     // Combine all the routes together.
-    let rest_routes = authorized_routes
+    let rest_routes = auth_token_route
+        .or(authorized_routes)
         .or(api_doc)
         .or(redirect_root_to_ui_route)
         .or(ui_handler())
@@ -584,6 +605,8 @@ fn api_v1_routes(
         )
         .or(cluster_handler(quickwit_services.cluster.clone()))
         .boxed()
+        .or(whoami_handler())
+        .boxed()
         .or(node_info_handler(
             BuildInfo::get(),
             RuntimeInfo::get(),
@@ -840,6 +863,23 @@ mod tests {
     use crate::rest::recover_fn_final;
 
     #[test]
+    fn test_requires_authorization_token() {
+        for path in ["/api/v1/indexes", "/api/developer/debug", "/mcp"] {
+            assert!(requires_authorization_token(path), "{path}");
+        }
+        for path in [
+            "/ui",
+            "/ui/search",
+            "/openapi.json",
+            "/health/livez",
+            "/metrics",
+            "/",
+        ] {
+            assert!(!requires_authorization_token(path), "{path}");
+        }
+    }
+
+    #[test]
     fn test_rest_request_family() {
         use quickwit_authorize::RequestFamily;
 
@@ -1011,6 +1051,7 @@ mod tests {
             metastore_server_opt: None,
             node_config: Arc::new(node_config.clone()),
             search_service: Arc::new(MockSearchService::new()),
+            token_exchange_opt: None,
             jaeger_service_opt: None,
             compactor_service_opt: None,
             env_filter_reload_fn: crate::do_nothing_env_filter_reload_fn(),

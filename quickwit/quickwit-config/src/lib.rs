@@ -77,9 +77,10 @@ pub use crate::metastore_config::{
 };
 pub use crate::node_config::{
     AuthorizationConfig, CacheConfig, CachePolicy, CompactorConfig, DEFAULT_QW_CONFIG_PATH,
-    GrpcConfig, HealthConfig, IndexerConfig, IngestApiConfig, JaegerConfig, KeepAliveConfig,
-    LambdaConfig, LambdaDeployConfig, MAX_GOSSIP_PROTOCOL_VERSION, NodeConfig, RestConfig,
-    SearcherConfig, SplitCacheLimits, StorageTimeoutPolicy, TlsConfig,
+    GrpcConfig, HealthConfig, IndexerConfig, IngestApiConfig, JaegerConfig, JwtConfig,
+    KeepAliveConfig, LambdaConfig, LambdaDeployConfig, MAX_GOSSIP_PROTOCOL_VERSION, NodeConfig,
+    RestConfig, RoleConfig, RoleGrantConfig, SearcherConfig, SplitCacheLimits,
+    StorageTimeoutPolicy, TlsConfig,
 };
 pub use crate::serde_utils::HumanDuration;
 use crate::source_config::serialize::{SourceConfigV0_7, SourceConfigV0_8, VersionedSourceConfig};

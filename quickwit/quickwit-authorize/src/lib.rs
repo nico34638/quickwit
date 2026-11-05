@@ -31,23 +31,33 @@
 
 mod authorizer;
 mod context;
+mod identity;
 mod layer;
+mod policy;
 mod rest_layer;
 mod state;
 mod token;
 
-pub use authorizer::{Authorization, RequestFamily, authorize_request};
+pub use authorizer::{
+    Authorization, IndexFilter, RequestFamily, authorize_operation, authorize_request,
+    current_index_filter,
+};
 pub use context::{
     AUTHORIZATION_TOKEN, build_tonic_request_with_auth_token, execute_with_authorization,
     extract_auth_token, inject_auth_token, spawn_inherit_auth_context, with_node_authorization,
 };
+pub use identity::{Identity, current_identity};
 pub use layer::{AuthorizationLayer, AuthorizationService};
+pub use policy::{IndexScope, RoleGrantSettings};
 pub use rest_layer::{
     AuthorizationTokenExtractionLayer, AuthorizationTokenExtractionService,
     check_rest_authorization_header,
 };
 pub use state::{AuthorizationSettings, init_authorization, is_authorization_enabled};
-pub use token::{AuthorizationToken, UserTokenSpec, generate_root_key_pair, generate_token};
+pub use token::{
+    AuthorizationToken, IssuedToken, TokenIssuer, UserTokenSpec, attenuate_token,
+    generate_root_key_pair, generate_token,
+};
 
 #[derive(
     thiserror::Error, Debug, Clone, Copy, Eq, PartialEq, serde::Serialize, serde::Deserialize,
@@ -58,6 +68,11 @@ pub enum AuthorizationError {
     AuthorizationTokenMissing,
     #[error("invalid authorization token")]
     InvalidToken,
+    /// The checks of the token itself failed: it expired, or one of the blocks appended by its
+    /// holder (attenuation) does not allow the request. Like an invalid token, it is reported as
+    /// unauthenticated (401), so that clients obtain a new token.
+    #[error("authorization token expired or rejected by its own checks")]
+    ExpiredToken,
     #[error("permission denied")]
     PermissionDenied,
 }
@@ -65,7 +80,9 @@ pub enum AuthorizationError {
 impl From<AuthorizationError> for tonic::Status {
     fn from(authorization_error: AuthorizationError) -> tonic::Status {
         match authorization_error {
-            AuthorizationError::AuthorizationTokenMissing | AuthorizationError::InvalidToken => {
+            AuthorizationError::AuthorizationTokenMissing
+            | AuthorizationError::InvalidToken
+            | AuthorizationError::ExpiredToken => {
                 tonic::Status::unauthenticated(authorization_error.to_string())
             }
             AuthorizationError::PermissionDenied => {

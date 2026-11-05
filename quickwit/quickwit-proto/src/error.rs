@@ -82,7 +82,7 @@ pub trait ServiceError: Error + Debug + 'static {
 impl ServiceError for quickwit_authorize::AuthorizationError {
     fn error_code(&self) -> ServiceErrorCode {
         match self {
-            Self::AuthorizationTokenMissing | Self::InvalidToken => {
+            Self::AuthorizationTokenMissing | Self::InvalidToken | Self::ExpiredToken => {
                 ServiceErrorCode::Unauthenticated
             }
             Self::PermissionDenied => ServiceErrorCode::Forbidden,

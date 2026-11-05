@@ -150,9 +150,16 @@ function SearchView() {
       searchRequest.startTimestamp = null;
       searchRequest.endTimestamp = null;
     }
-    quickwitClient.getIndex(searchRequest.indexId).then((fetchedIndex) => {
-      setIndex(fetchedIndex);
-    });
+    quickwitClient.getIndex(searchRequest.indexId).then(
+      (fetchedIndex) => {
+        setIndex(fetchedIndex);
+      },
+      (error) => {
+        // For instance, an index of a previous search that the current user cannot read.
+        setSearchResponse(null);
+        setSearchError(error);
+      },
+    );
   }, [searchRequest, quickwitClient, index]);
 
   const searchParams = toUrlSearchRequestParams(searchRequest);

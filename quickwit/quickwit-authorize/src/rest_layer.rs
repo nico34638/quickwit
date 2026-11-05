@@ -28,8 +28,8 @@ use crate::{AuthorizationError, AuthorizationToken, RequestFamily, execute_with_
 /// duration of the request.
 ///
 /// This layer never rejects a request: routes that require authentication must also check the
-/// header with [`check_rest_authorization_header`]. Otherwise, a request without a valid token
-/// runs with no token in context and its gRPC calls fall back to the node token.
+/// header with [`check_rest_authorization_header`]. A request without a valid token runs with no
+/// token in context, so the services it calls deny it (there is no fallback on the node token).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AuthorizationTokenExtractionLayer;
 

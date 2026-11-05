@@ -71,6 +71,10 @@ mod tests {
         fn request_family(&self) -> RequestFamily {
             RequestFamily::IndexAdmin
         }
+
+        fn index_scope(&self) -> crate::IndexScope {
+            crate::IndexScope::AllIndexes
+        }
     }
 
     #[derive(Debug)]

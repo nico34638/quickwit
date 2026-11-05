@@ -13,15 +13,15 @@
 // limitations under the License.
 
 use std::collections::BTreeMap;
-use std::str::FromStr;
 use std::sync::OnceLock;
 
 use anyhow::{Context, bail};
-use biscuit_auth::PublicKey;
+use biscuit_auth::{AuthorizerBuilder, PublicKey};
 use tracing::info;
 
 use crate::AuthorizationToken;
-use crate::authorizer::RequestFamily;
+use crate::authorizer::authorizer_template;
+use crate::policy::{RoleGrantSettings, RolePolicy};
 use crate::token::{ROOT_KEY_ALGORITHM, validate_datalog_string};
 
 /// Authorization settings, built from the `authorization` section of the node config.
@@ -29,8 +29,8 @@ use crate::token::{ROOT_KEY_ALGORITHM, validate_datalog_string};
 pub struct AuthorizationSettings {
     pub root_public_key_hex: String,
     pub node_token_base64: String,
-    /// Role name -> request families granted to the role.
-    pub roles: BTreeMap<String, Vec<String>>,
+    /// Role name -> grants of the role.
+    pub roles: BTreeMap<String, Vec<RoleGrantSettings>>,
 }
 
 // The node token is a bearer credential: never print it.
@@ -48,8 +48,9 @@ impl std::fmt::Debug for AuthorizationSettings {
 pub(crate) struct EnabledState {
     pub root_public_key: PublicKey,
     pub node_token: AuthorizationToken,
-    /// `role_right("<role>", "<request family>");` facts, added to every authorizer.
-    pub role_rights_datalog: String,
+    pub policy: RolePolicy,
+    /// Cloned for each evaluation, so that its datalog is only parsed once.
+    pub authorizer_template: AuthorizerBuilder,
 }
 
 enum AuthorizationState {
@@ -97,22 +98,18 @@ fn build_enabled_state(settings: &AuthorizationSettings) -> anyhow::Result<Enabl
             .context("failed to parse authorization root public key")?;
     let node_token = AuthorizationToken::parse(&settings.node_token_base64, root_public_key)
         .context("failed to parse authorization node token")?;
-    let mut role_rights_datalog = String::new();
-    for (role, request_families) in &settings.roles {
-        let role = validate_datalog_string(role)?;
-        for request_family_str in request_families {
-            let request_family = RequestFamily::from_str(request_family_str)
-                .with_context(|| format!("invalid right for role `{role}`"))?;
-            role_rights_datalog.push_str(&format!(
-                "role_right(\"{role}\", \"{}\");\n",
-                request_family.as_str()
-            ));
-        }
+    // Role names end up in tokens, as datalog strings.
+    for role in settings.roles.keys() {
+        validate_datalog_string(role)?;
     }
+    let policy = RolePolicy::from_settings(&settings.roles)?;
+    let authorizer_template =
+        authorizer_template().context("failed to build authorizer template")?;
     Ok(EnabledState {
         root_public_key,
         node_token,
-        role_rights_datalog,
+        policy,
+        authorizer_template,
     })
 }
 

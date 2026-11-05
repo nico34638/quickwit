@@ -34,6 +34,7 @@ use tower::ServiceBuilder;
 use tracing::info;
 
 use crate::balance_channel_for_service;
+use crate::metastore_authorization::IndexListingFilterLayer;
 
 const METASTORE_CLIENT_MAX_CONCURRENCY_ENV_KEY: &str = "QW_METASTORE_CLIENT_MAX_CONCURRENCY";
 const DEFAULT_METASTORE_CLIENT_MAX_CONCURRENCY: usize = 6;
@@ -243,6 +244,8 @@ pub(super) async fn start_metastore_service_if_needed(
             .stack_add_source_layer(broker_layer.clone())
             .stack_delete_source_layer(broker_layer.clone())
             .stack_toggle_source_layer(broker_layer)
+            .stack_list_indexes_metadata_layer(IndexListingFilterLayer)
+            .stack_list_index_stats_layer(IndexListingFilterLayer)
             .build(metastore);
         return Ok(LocalMetastoreServer::Primary(metastore));
     }
@@ -277,6 +280,8 @@ pub(super) async fn start_metastore_service_if_needed(
             .into_inner();
         let metastore = MetastoreServiceClient::tower()
             .stack_layer(shared_layer)
+            .stack_list_indexes_metadata_layer(IndexListingFilterLayer)
+            .stack_list_index_stats_layer(IndexListingFilterLayer)
             .build(metastore);
         return Ok(LocalMetastoreServer::ReadReplica(metastore));
     }
