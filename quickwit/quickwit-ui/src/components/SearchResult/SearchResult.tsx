@@ -71,7 +71,7 @@ export default function SearchResult(props: SearchResultProps) {
   }
 
   if (props.searchError !== null) {
-    return ErrorResponseDisplay(props.searchError);
+    return <ErrorResponseDisplay {...props.searchError} />;
   }
 
   if (props.searchResponse == null || props.index == null) {

@@ -172,8 +172,11 @@ impl<A: Actor> SpawnBuilder<A> {
         debug!(actor_id = %ctx.actor_instance_id(), "spawn-actor");
         let mailbox = ctx.mailbox().clone();
         let ctx_clone = ctx.clone();
-        let loop_async_actor_future =
-            async move { actor_loop(actor, inbox, no_advance_time_guard, ctx).await };
+        // Actors are system tasks: they act on behalf of the node, even when they handle messages
+        // sent while serving a user request, whose rights were checked when it was received.
+        let loop_async_actor_future = quickwit_authorize::with_node_authorization(async move {
+            actor_loop(actor, inbox, no_advance_time_guard, ctx).await
+        });
         let join_handle = ActorJoinHandle::new(quickwit_common::spawn_named_task_on(
             loop_async_actor_future,
             std::any::type_name::<A>(),

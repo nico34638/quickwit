@@ -338,6 +338,19 @@ pub(crate) async fn scroll(
     let mut scroll_context = ScrollContext::load(&payload)
         .map_err(|_| SearchError::Internal("corrupted Scroll context".to_string()))?;
 
+    // Scroll IDs are not bound to the user who started the scroll: the current user must be
+    // allowed to read all the indexes of the scroll context.
+    let index_ids: Vec<String> = scroll_context
+        .indexes_metas_for_leaf_search
+        .keys()
+        .map(|index_uid| index_uid.index_id.clone())
+        .collect();
+    quickwit_authorize::authorize_operation(
+        "scroll",
+        quickwit_authorize::RequestFamily::IndexRead,
+        &quickwit_authorize::IndexScope::Indexes(index_ids),
+    )?;
+
     let end_doc: u64 = start_doc + scroll_context.max_hits_per_page;
 
     let mut partial_hits = Vec::new();

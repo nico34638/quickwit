@@ -46,6 +46,7 @@ function IndexAutocomplete(props: IndexMetadataProps) {
   const [options, setOptions] = React.useState<readonly IndexMetadata[]>([]);
   const [value, setValue] = React.useState<IndexMetadata | null>(null);
   const [loading, setLoading] = React.useState(false);
+  const [listingError, setListingError] = React.useState<string | null>(null);
   // We want to show the circular progress only if we are loading some results and
   // when there is no option available.
   const showLoading = loading && options.length === 0;
@@ -59,10 +60,16 @@ function IndexAutocomplete(props: IndexMetadataProps) {
     quickwitClient.listIndexes().then(
       (indexesMetadata) => {
         setOptions([...indexesMetadata]);
+        setListingError(null);
         setLoading(false);
       },
       (error) => {
         console.log("Index autocomplete error", error);
+        setListingError(
+          error.status === 403
+            ? "Your roles do not allow reading any index."
+            : `Failed to list the indexes: ${error.message}`,
+        );
         setLoading(false);
       },
     );
@@ -110,7 +117,7 @@ function IndexAutocomplete(props: IndexMetadataProps) {
       }
       getOptionLabel={(option) => option.index_config.index_id}
       options={options}
-      noOptionsText="No indexes."
+      noOptionsText={listingError ?? "No indexes."}
       loading={loading}
       renderInput={(params) => (
         <TextField

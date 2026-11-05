@@ -36,7 +36,7 @@ function IndexesView() {
 
   const renderFetchIndexesResult = () => {
     if (responseError !== null) {
-      return ErrorResponseDisplay(responseError);
+      return <ErrorResponseDisplay {...responseError} />;
     }
     if (loading || indexesMetadata === undefined) {
       return <Loader />;

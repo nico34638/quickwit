@@ -373,7 +373,7 @@ impl IngestSource {
                 }
             };
             // Truncation is best-effort, so fire and forget.
-            tokio::spawn(truncate_future);
+            quickwit_common::spawn_named_task(truncate_future, "truncate_shards");
         }
     }
 

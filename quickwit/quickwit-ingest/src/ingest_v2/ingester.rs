@@ -262,9 +262,10 @@ impl Ingester {
     fn background_reset_shards(&self) {
         let mut ingester = self.clone();
 
-        let future = async move {
+        // Resetting shards is a maintenance task of the node, whatever request triggered it.
+        let future = quickwit_authorize::with_node_authorization(async move {
             ingester.reset_shards().await;
-        };
+        });
         tokio::spawn(future);
     }
 

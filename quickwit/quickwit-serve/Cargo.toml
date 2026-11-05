@@ -28,6 +28,7 @@ http-serde = { workspace = true }
 humantime = { workspace = true }
 hyper-util = { workspace = true }
 itertools = { workspace = true }
+jsonwebtoken = { workspace = true }
 mime_guess = { workspace = true }
 opentelemetry = { workspace = true }
 percent-encoding = { workspace = true }
@@ -35,12 +36,14 @@ pprof = { workspace = true, optional = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
 regex = { workspace = true }
+reqwest = { workspace = true }
 rust-embed = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_qs = { workspace = true }
 serde_with = { workspace = true }
 thiserror = { workspace = true }
+time = { workspace = true }
 tokio = { workspace = true }
 tokio-rustls = { workspace = true }
 tokio-stream = { workspace = true }
@@ -58,6 +61,7 @@ zstd = { workspace = true }
 
 quickwit-actors = { workspace = true }
 quickwit-cluster = { workspace = true }
+quickwit-authorize = { workspace = true }
 quickwit-common = { workspace = true }
 quickwit-compaction = { workspace = true }
 quickwit-config = { workspace = true }

@@ -68,7 +68,7 @@ pub(crate) async fn spawn_catchup_callback_task(
             }
         }
     };
-    tokio::spawn(catchup_callback_future);
+    quickwit_common::spawn_named_task(catchup_callback_future, "grpc_gossip_catchup");
 }
 
 async fn perform_grpc_gossip_rounds<ClusterServiceClientFactory, Fut>(

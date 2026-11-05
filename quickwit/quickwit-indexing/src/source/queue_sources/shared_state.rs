@@ -50,7 +50,7 @@ impl QueueSharedState {
         pruning_interval: Duration,
     ) -> Self {
         let cleanup_handle = Arc::new(());
-        tokio::spawn(Self::run_cleanup_task(
+        quickwit_common::spawn_named_task(Self::run_cleanup_task(
             metastore.clone(),
             source_uid.clone(),
             max_age,
@@ -82,7 +82,7 @@ impl QueueSharedState {
             index_uid,
             source_id,
         } = source_uid;
-        tokio::spawn(async move {
+        quickwit_common::spawn_named_task(async move {
             let mut interval = tokio::time::interval(pruning_interval);
             loop {
                 interval.tick().await;

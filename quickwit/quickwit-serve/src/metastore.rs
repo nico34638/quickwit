@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use anyhow::{Context, bail, ensure};
 use bytesize::ByteSize;
+use quickwit_authorize::AuthorizationLayer;
 use quickwit_cluster::Cluster;
 use quickwit_common::pubsub::EventBroker;
 use quickwit_common::retry::RetryParams;
@@ -33,6 +34,7 @@ use tower::ServiceBuilder;
 use tracing::info;
 
 use crate::balance_channel_for_service;
+use crate::metastore_authorization::IndexListingFilterLayer;
 
 const METASTORE_CLIENT_MAX_CONCURRENCY_ENV_KEY: &str = "QW_METASTORE_CLIENT_MAX_CONCURRENCY";
 const DEFAULT_METASTORE_CLIENT_MAX_CONCURRENCY: usize = 6;
@@ -226,6 +228,7 @@ pub(super) async fn start_metastore_service_if_needed(
         // These layers apply to all the RPCs of the metastore.
         let shared_layer = ServiceBuilder::new()
             .layer(PRIMARY_METASTORE_GRPC_SERVER_METRICS_LAYER.clone())
+            .layer(AuthorizationLayer)
             .layer(LoadShedLayer::new(
                 LocalMetastoreServer::metastore_max_in_flight_requests(
                     node_config,
@@ -241,6 +244,8 @@ pub(super) async fn start_metastore_service_if_needed(
             .stack_add_source_layer(broker_layer.clone())
             .stack_delete_source_layer(broker_layer.clone())
             .stack_toggle_source_layer(broker_layer)
+            .stack_list_indexes_metadata_layer(IndexListingFilterLayer)
+            .stack_list_index_stats_layer(IndexListingFilterLayer)
             .build(metastore);
         return Ok(LocalMetastoreServer::Primary(metastore));
     }
@@ -265,6 +270,7 @@ pub(super) async fn start_metastore_service_if_needed(
             })?;
         let shared_layer = ServiceBuilder::new()
             .layer(READ_REPLICA_METASTORE_GRPC_SERVER_METRICS_LAYER.clone())
+            .layer(AuthorizationLayer)
             .layer(LoadShedLayer::new(
                 LocalMetastoreServer::metastore_max_in_flight_requests(
                     node_config,
@@ -274,6 +280,8 @@ pub(super) async fn start_metastore_service_if_needed(
             .into_inner();
         let metastore = MetastoreServiceClient::tower()
             .stack_layer(shared_layer)
+            .stack_list_indexes_metadata_layer(IndexListingFilterLayer)
+            .stack_list_index_stats_layer(IndexListingFilterLayer)
             .build(metastore);
         return Ok(LocalMetastoreServer::ReadReplica(metastore));
     }

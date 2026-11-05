@@ -27,6 +27,7 @@ import { GroupWork } from "@styled-icons/material-outlined/GroupWork";
 import { CodeSSlash } from "@styled-icons/remix-line/CodeSSlash";
 import * as React from "react";
 import { Link as RouterLink, LinkProps as RouterLinkProps } from "react-router";
+import { useAuth } from "../providers/AuthProvider";
 import { useLocalStorage } from "../providers/LocalStorageProvider";
 import { toUrlSearchRequestParams } from "../utils/urls";
 import { APP_BAR_HEIGHT_PX } from "./LayoutUtils";
@@ -74,6 +75,8 @@ const SideBarWrapper = styled("div")({
 
 const SideBar = () => {
   const lastSearchRequest = useLocalStorage().lastSearchRequest;
+  // The cluster and node pages require the `cluster` right when authorization is enabled.
+  const { hasClusterRight } = useAuth();
   let searchUrl = "/search";
   if (lastSearchRequest.indexId || lastSearchRequest.query) {
     searchUrl =
@@ -98,16 +101,20 @@ const SideBar = () => {
           primary={<Typography variant="body1">Indexes</Typography>}
           icon={<Database size="18px" />}
         />
-        <ListItemLink
-          to="/cluster"
-          primary={<Typography variant="body1">Cluster</Typography>}
-          icon={<GroupWork size="18px" />}
-        />
-        <ListItemLink
-          to="/node-info"
-          primary={<Typography variant="body1">Node info</Typography>}
-          icon={<Settings size="18px" />}
-        />
+        {hasClusterRight && (
+          <ListItemLink
+            to="/cluster"
+            primary={<Typography variant="body1">Cluster</Typography>}
+            icon={<GroupWork size="18px" />}
+          />
+        )}
+        {hasClusterRight && (
+          <ListItemLink
+            to="/node-info"
+            primary={<Typography variant="body1">Node info</Typography>}
+            icon={<Settings size="18px" />}
+          />
+        )}
         <ListItemLink
           to="/api-playground"
           primary={<Typography variant="body1">API </Typography>}

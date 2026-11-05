@@ -14,6 +14,7 @@
 
 #![recursion_limit = "256"]
 
+mod auth_api;
 mod build_info;
 mod cluster_api;
 mod decompression;
@@ -30,6 +31,7 @@ mod jaeger_api;
 mod load_shield;
 mod mcp_api;
 mod metastore;
+mod metastore_authorization;
 mod metrics;
 mod metrics_api;
 mod node_info_handler;
@@ -61,6 +63,7 @@ use futures::StreamExt;
 use futures::future::OptionFuture;
 use itertools::Itertools;
 use quickwit_actors::{ActorExitStatus, ActorHandle, Mailbox, SpawnContext, Universe};
+use quickwit_authorize::AuthorizationLayer;
 use quickwit_cluster::{
     Cluster, ClusterChange, ClusterChangeStream, ClusterNode, ListenerHandle, start_cluster_service,
 };
@@ -132,6 +135,7 @@ use tower::timeout::Timeout;
 use tracing::{debug, error, info, warn};
 use warp::{Filter, Rejection};
 
+use crate::auth_api::TokenExchange;
 pub use crate::build_info::{BuildInfo, RuntimeInfo};
 pub use crate::index_api::{ListSplitsQueryParams, ListSplitsResponse};
 pub use crate::ingest_api::{RestIngestResponse, RestParseFailure};
@@ -202,6 +206,9 @@ struct QuickwitServices {
     /// It is only used to serve the rest API calls and will only execute
     /// the root requests.
     pub search_service: Arc<dyn SearchService>,
+
+    /// Exchange of JWTs for Quickwit tokens, when this node serves it.
+    pub token_exchange_opt: Option<Arc<TokenExchange>>,
 
     pub env_filter_reload_fn: EnvFilterReloadFn,
 
@@ -292,6 +299,7 @@ async fn get_compaction_planner_client_if_needed(
         let planner_client = CompactionPlannerServiceClient::tower()
             .stack_layer(COMPACTION_GRPC_SERVER_METRICS_LAYER.clone())
             .stack_layer(TimeoutLayer::new(GRPC_COMPACTION_PLANNER_SERVICE_TIMEOUT))
+            .stack_layer(AuthorizationLayer)
             .build_from_mailbox(mailbox);
         return Ok((Some(planner_client), Some(handle)));
     }
@@ -381,6 +389,7 @@ async fn start_ingest_client_if_needed(
         let min_rate = ConstantRate::new(ByteSize::mib(1).as_u64(), Duration::from_millis(100));
         let rate_modulator = RateModulator::new(rate_estimator.clone(), memory_capacity, min_rate);
         let ingest_service = IngestServiceClient::tower()
+            .stack_layer(AuthorizationLayer)
             .stack_ingest_layer(
                 ServiceBuilder::new()
                     .layer(EstimateRateLayer::<IngestRequest, _>::new(rate_estimator))
@@ -437,6 +446,7 @@ async fn start_control_plane_if_needed(
         let control_plane_client = ControlPlaneServiceClient::tower()
             .stack_layer(CP_GRPC_SERVER_METRICS_LAYER.clone())
             .stack_layer(LoadShedLayer::new(100))
+            .stack_layer(AuthorizationLayer)
             .build_from_mailbox(control_plane_mailbox);
         Ok((control_plane_server_opt, control_plane_client))
     } else {
@@ -482,17 +492,20 @@ fn start_shard_positions_service(
 ) {
     // We spawn a task here, because we need the ingester to be ready before spawning the
     // the `ShardPositionsService`. If we don't, all the events we emit too early will be dismissed.
-    tokio::spawn(async move {
-        if let Some(ingester) = &ingester_opt
-            && ingester
-                .wait_for_status(IngesterStatus::Ready, Duration::from_mins(5))
-                .await
-                .is_err()
-        {
-            warn!("ingester failed to reach ready status");
-        }
-        ShardPositionsService::spawn(&spawn_ctx, event_broker, cluster);
-    });
+    spawn_named_task(
+        async move {
+            if let Some(ingester) = &ingester_opt
+                && ingester
+                    .wait_for_status(IngesterStatus::Ready, Duration::from_mins(5))
+                    .await
+                    .is_err()
+            {
+                warn!("ingester failed to reach ready status");
+            }
+            ShardPositionsService::spawn(&spawn_ctx, event_broker, cluster);
+        },
+        "start_shard_positions_service",
+    );
 }
 
 /// Waits for an external shutdown signal or for the server supervisor to exit, then notifies all
@@ -568,6 +581,59 @@ async fn shutdown_signal_handler(
 }
 
 pub async fn serve_quickwit(
+    node_config: NodeConfig,
+    runtimes_config: RuntimesConfig,
+    metastore_resolver: MetastoreResolver,
+    storage_resolver: StorageResolver,
+    tcp_listener_resolver: impl TcpListenerResolver,
+    shutdown_signal: BoxFutureInfaillible<()>,
+    env_filter_reload_fn: EnvFilterReloadFn,
+) -> anyhow::Result<HashMap<String, ActorExitStatus>> {
+    // Must happen before any service is started: services check and forward authorization tokens
+    // as soon as they handle requests.
+    let authorization_settings_opt =
+        node_config
+            .authorization_config
+            .as_ref()
+            .map(
+                |authorization_config| quickwit_authorize::AuthorizationSettings {
+                    root_public_key_hex: authorization_config.root_public_key.clone(),
+                    node_token_base64: authorization_config.node_token.clone(),
+                    roles: authorization_config
+                        .roles
+                        .iter()
+                        .map(|(role, role_config)| {
+                            let grants = role_config
+                                .grants()
+                                .into_iter()
+                                .map(|grant| quickwit_authorize::RoleGrantSettings {
+                                    rights: grant.rights,
+                                    indexes: grant.indexes,
+                                })
+                                .collect();
+                            (role.clone(), grants)
+                        })
+                        .collect(),
+                },
+            );
+    quickwit_authorize::init_authorization(authorization_settings_opt)
+        .context("failed to initialize authorization")?;
+
+    // Node startup and the background tasks it spawns (which inherit the context) act on behalf
+    // of the node.
+    quickwit_authorize::with_node_authorization(serve_quickwit_with_node_authorization(
+        node_config,
+        runtimes_config,
+        metastore_resolver,
+        storage_resolver,
+        tcp_listener_resolver,
+        shutdown_signal,
+        env_filter_reload_fn,
+    ))
+    .await
+}
+
+async fn serve_quickwit_with_node_authorization(
     node_config: NodeConfig,
     runtimes_config: RuntimesConfig,
     metastore_resolver: MetastoreResolver,
@@ -901,6 +967,13 @@ pub async fn serve_quickwit(
         None
     };
 
+    let token_exchange_opt = match &node_config.authorization_config {
+        Some(authorization_config) => TokenExchange::try_new(authorization_config)
+            .context("failed to initialize JWT token exchange")?
+            .map(Arc::new),
+        None => None,
+    };
+
     let grpc_listen_addr = node_config.grpc_listen_addr;
     let rest_listen_addr = node_config.rest_config.listen_addr;
     let ingester_decommission_timeout = node_config.ingest_api_config.decommission_timeout();
@@ -927,6 +1000,7 @@ pub async fn serve_quickwit(
         otlp_logs_service_opt,
         otlp_traces_service_opt,
         search_service,
+        token_exchange_opt,
         env_filter_reload_fn,
     });
     // Setup and start gRPC server.
@@ -1011,19 +1085,22 @@ pub async fn serve_quickwit(
     );
 
     let shutdown_token = CancellationToken::new();
-    let shutdown_handle = tokio::spawn(shutdown_signal_handler(
-        shutdown_signal,
-        shutdown_token.clone(),
-        universe,
-        ingester_opt,
-        ingester_decommission_timeout,
-        compactor_service_opt,
-        compactor_decommission_timeout,
-        grpc_shutdown_trigger_tx,
-        rest_shutdown_trigger_tx,
-        health_shutdown_trigger_tx_opt,
-        cluster.clone(),
-    ));
+    let shutdown_handle = spawn_named_task(
+        shutdown_signal_handler(
+            shutdown_signal,
+            shutdown_token.clone(),
+            universe,
+            ingester_opt,
+            ingester_decommission_timeout,
+            compactor_service_opt,
+            compactor_decommission_timeout,
+            grpc_shutdown_trigger_tx,
+            rest_shutdown_trigger_tx,
+            health_shutdown_trigger_tx_opt,
+            cluster.clone(),
+        ),
+        "shutdown_signal_handler",
+    );
     let grpc_join_handle = async move {
         spawn_named_task(grpc_server, "grpc_server")
             .await
@@ -1103,6 +1180,7 @@ fn ingester_service_layer_stack(
 ) -> IngesterServiceTowerLayerStack {
     layer_stack
         .stack_layer(INGEST_GRPC_SERVER_METRICS_LAYER.clone())
+        .stack_layer(AuthorizationLayer)
         .stack_persist_layer(quickwit_common::tower::OneTaskPerCallLayer)
         .stack_persist_layer(
             // "3" may seem a little bit low, but we only consider error caused by a full WAL.
@@ -1146,6 +1224,7 @@ async fn setup_ingest_v2(
 
     let ingest_router_service = IngestRouterServiceClient::tower()
         .stack_layer(INGEST_GRPC_SERVER_METRICS_LAYER.clone())
+        .stack_layer(AuthorizationLayer)
         .build(ingest_router.clone());
 
     let rate_limit =

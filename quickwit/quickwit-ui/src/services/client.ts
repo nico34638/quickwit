@@ -22,6 +22,12 @@ import {
   SplitMetadata,
 } from "../utils/models";
 import { serializeSortByField } from "../utils/urls";
+import {
+  authorizationHeaders,
+  Identity,
+  notifyAuthRequired,
+  parseErrorMessage,
+} from "./auth";
 
 export class Client {
   private readonly _host: string;
@@ -106,10 +112,22 @@ export class Client {
     return this.fetch(`${this.apiRoot()}indexes`, {});
   }
 
+  // Identity and rights of the token of the UI. A 401 is not reported to the listeners of
+  // `onAuthRequired`: the caller handles it.
+  async whoami(): Promise<Identity> {
+    return this.fetch(
+      `${this.apiRoot()}auth/whoami`,
+      this.defaultGetRequestParams(),
+      null,
+      false,
+    );
+  }
+
   async fetch<T>(
     url: string,
     params: RequestInit,
     body: string | null = null,
+    notifyUnauthenticated = true,
   ): Promise<T> {
     if (body !== null) {
       params.method = "POST";
@@ -119,11 +137,19 @@ export class Client {
         "content-type": "application/json",
       };
     }
+    params.headers = {
+      ...params.headers,
+      ...authorizationHeaders(),
+    };
     const response = await fetch(url, params);
     if (response.ok) {
       return response.json() as Promise<T>;
     }
-    const message = await response.text();
+    if (response.status === 401 && notifyUnauthenticated) {
+      // Missing, invalid, or expired token: let the UI ask for a new one.
+      notifyAuthRequired();
+    }
+    const message = parseErrorMessage(await response.text());
     return await Promise.reject({
       message: message,
       status: response.status,

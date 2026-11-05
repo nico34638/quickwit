@@ -51,7 +51,7 @@ function ClusterView() {
 
   const renderResult = () => {
     if (responseError !== null) {
-      return ErrorResponseDisplay(responseError);
+      return <ErrorResponseDisplay {...responseError} />;
     }
     if (loading || cluster == null) {
       return <Loader />;

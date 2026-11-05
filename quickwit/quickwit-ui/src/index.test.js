@@ -12,20 +12,105 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { describe, expect, it } from "@jest/globals";
-import { render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, jest } from "@jest/globals";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { BrowserRouter } from "react-router";
 import App from "./views/App";
 
+const AUTHORIZATION_DISABLED = {
+  authorization_enabled: false,
+  user: null,
+  roles: [],
+  node: false,
+  grants: [],
+  cluster: true,
+};
+
+const READER = {
+  authorization_enabled: true,
+  user: "bob",
+  roles: ["reader"],
+  node: false,
+  grants: [{ rights: ["index:read"], indexes: ["*"] }],
+  cluster: false,
+};
+
+// Answers `/auth/whoami` with `whoami(headers)`, and the other API calls with an empty list.
+function mockFetch(whoami) {
+  global.fetch = jest.fn((url, options) => {
+    const { status, body } = url.includes("auth/whoami")
+      ? whoami(options?.headers ?? {})
+      : { status: 200, body: [] };
+    return Promise.resolve({
+      ok: status >= 200 && status < 300,
+      status,
+      json: () => Promise.resolve(body),
+      text: () => Promise.resolve(JSON.stringify(body)),
+    });
+  });
+}
+
+function renderApp() {
+  render(
+    <BrowserRouter>
+      <App />
+    </BrowserRouter>,
+  );
+}
+
 describe("App", () => {
-  it("Should display side bar links", () => {
-    render(
-      <BrowserRouter>
-        <App />
-      </BrowserRouter>,
-    );
-    expect(screen.getByText(/Discover/)).toBeInTheDocument();
+  afterEach(() => {
+    localStorage.clear();
+  });
+
+  it("Should display side bar links", async () => {
+    mockFetch(() => ({ status: 200, body: AUTHORIZATION_DISABLED }));
+    renderApp();
+    expect(await screen.findByText(/Discover/)).toBeInTheDocument();
     expect(screen.getByText(/Query editor/)).toBeInTheDocument();
     expect(screen.getByText(/Admin/)).toBeInTheDocument();
+    expect(screen.getByText(/^Cluster$/)).toBeInTheDocument();
+    expect(
+      screen.queryByText(/requires authorization/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("Should ask for a token, then adapt to the rights of the user", async () => {
+    mockFetch((headers) =>
+      headers.Authorization === "Bearer reader-token"
+        ? { status: 200, body: READER }
+        : { status: 401, body: { message: "authorization token missing" } },
+    );
+    renderApp();
+    expect(
+      await screen.findByText(/This Quickwit cluster requires authorization/),
+    ).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/Token/), {
+      target: { value: "reader-token" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+
+    // The user menu shows the user, and the pages requiring the `cluster` right are hidden.
+    expect(await screen.findByText("bob")).toBeInTheDocument();
+    expect(screen.getByText(/Query editor/)).toBeInTheDocument();
+    expect(screen.queryByText(/^Cluster$/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Node info/)).not.toBeInTheDocument();
+  });
+
+  it("Should reject an invalid token", async () => {
+    mockFetch(() => ({
+      status: 401,
+      body: { message: "invalid authorization token" },
+    }));
+    renderApp();
+    fireEvent.change(await screen.findByLabelText(/Token/), {
+      target: { value: "forged-token" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    expect(
+      await screen.findByText(/not valid for this cluster/),
+    ).toBeInTheDocument();
+    expect(localStorage.getItem("quickwitAuth")).toBeNull();
   });
 });

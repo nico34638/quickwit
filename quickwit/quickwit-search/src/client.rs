@@ -20,7 +20,8 @@ use std::time::Duration;
 use bytesize::ByteSize;
 use futures::future::{BoxFuture, FutureExt, Shared};
 use http::Uri;
-use quickwit_common::tracing_utils::SpanContextInterceptor;
+use quickwit_authorize::with_node_authorization;
+use quickwit_common::tracing_utils::inject_current_context;
 use quickwit_proto::search::{GetKvRequest, PutKvRequest, ReportSplitsRequest};
 use quickwit_proto::tonic;
 use quickwit_proto::tonic::Request;
@@ -112,13 +113,29 @@ impl LoadCache {
     }
 }
 
+/// Adds the W3C trace context and the authorization token of the current task to the metadata of
+/// outgoing search gRPC requests.
+///
+/// Interceptors run when the request is sent, in the task of the caller, so they see its
+/// task-locals.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SearchClientInterceptor;
+
+impl tonic::service::Interceptor for SearchClientInterceptor {
+    fn call(&mut self, mut request: Request<()>) -> Result<Request<()>, tonic::Status> {
+        inject_current_context(request.metadata_mut());
+        quickwit_authorize::inject_auth_token(request.metadata_mut(), "search");
+        Ok(request)
+    }
+}
+
 /// Impl is an enumeration that meant to manage Quickwit's search service client types.
 #[derive(Clone)]
 enum SearchServiceClientImpl {
     Local(Arc<dyn SearchService>),
     Grpc(
         quickwit_proto::search::search_service_client::SearchServiceClient<
-            InterceptedService<Timeout<Channel>, SpanContextInterceptor>,
+            InterceptedService<Timeout<Channel>, SearchClientInterceptor>,
         >,
     ),
 }
@@ -126,6 +143,12 @@ enum SearchServiceClientImpl {
 /// A search service client.
 /// It contains the client implementation and the gRPC address of the node to which the client
 /// connects.
+///
+/// Hidden contract: the root requests (`root_search`, ...) are sent with the authorization token of
+/// the caller, whereas the requests exchanged between searchers (leaf requests, fetch docs, scroll
+/// contexts, load) are sent with the node token, whatever the caller. These requests are reserved
+/// to nodes: a user cannot send them directly. The root must only send them for indexes it resolved
+/// through the metastore listings, which are filtered by the rights of the user.
 #[derive(Clone)]
 pub struct SearchServiceClient {
     client_impl: SearchServiceClientImpl,
@@ -154,7 +177,7 @@ impl SearchServiceClient {
     /// Create a search service client instance given a gRPC client and gRPC address.
     pub fn from_grpc_client(
         client: quickwit_proto::search::search_service_client::SearchServiceClient<
-            InterceptedService<Timeout<Channel>, SpanContextInterceptor>,
+            InterceptedService<Timeout<Channel>, SearchClientInterceptor>,
         >,
         grpc_addr: SocketAddr,
     ) -> Self {
@@ -215,110 +238,141 @@ impl SearchServiceClient {
     }
 
     /// Perform leaf search.
+    ///
+    /// Sent with the node token: see the hidden contract of [`SearchServiceClient`].
     pub async fn leaf_search(
         &mut self,
         request: quickwit_proto::search::LeafSearchRequest,
     ) -> crate::Result<quickwit_proto::search::LeafSearchResponse> {
-        match &mut self.client_impl {
-            SearchServiceClientImpl::Grpc(grpc_client) => grpc_client
-                .leaf_search(request)
-                .await
-                .map(|tonic_response| tonic_response.into_inner())
-                .map_err(|tonic_error| parse_grpc_error(&tonic_error)),
-            SearchServiceClientImpl::Local(service) => service.leaf_search(request).await,
-        }
+        with_node_authorization(async {
+            match &mut self.client_impl {
+                SearchServiceClientImpl::Grpc(grpc_client) => grpc_client
+                    .leaf_search(request)
+                    .await
+                    .map(|tonic_response| tonic_response.into_inner())
+                    .map_err(|tonic_error| parse_grpc_error(&tonic_error)),
+                SearchServiceClientImpl::Local(service) => service.leaf_search(request).await,
+            }
+        })
+        .await
     }
 
-    /// Perform leaf search.
+    /// Perform leaf list fields.
+    ///
+    /// Sent with the node token: see the hidden contract of [`SearchServiceClient`].
     pub async fn leaf_list_fields(
         &mut self,
         request: quickwit_proto::search::LeafListFieldsRequest,
     ) -> crate::Result<quickwit_proto::search::ListFieldsResponse> {
-        match &mut self.client_impl {
-            SearchServiceClientImpl::Grpc(grpc_client) => {
-                let tonic_request = Request::new(request);
-                let tonic_response = grpc_client
-                    .leaf_list_fields(tonic_request)
-                    .await
-                    .map_err(|tonic_error| parse_grpc_error(&tonic_error))?;
-                Ok(tonic_response.into_inner())
+        with_node_authorization(async {
+            match &mut self.client_impl {
+                SearchServiceClientImpl::Grpc(grpc_client) => {
+                    let tonic_request = Request::new(request);
+                    let tonic_response = grpc_client
+                        .leaf_list_fields(tonic_request)
+                        .await
+                        .map_err(|tonic_error| parse_grpc_error(&tonic_error))?;
+                    Ok(tonic_response.into_inner())
+                }
+                SearchServiceClientImpl::Local(service) => service.leaf_list_fields(request).await,
             }
-            SearchServiceClientImpl::Local(service) => service.leaf_list_fields(request).await,
-        }
+        })
+        .await
     }
 
     /// Perform fetch docs.
+    ///
+    /// Sent with the node token: see the hidden contract of [`SearchServiceClient`].
     pub async fn fetch_docs(
         &mut self,
         request: quickwit_proto::search::FetchDocsRequest,
     ) -> crate::Result<quickwit_proto::search::FetchDocsResponse> {
-        match &mut self.client_impl {
-            SearchServiceClientImpl::Grpc(grpc_client) => {
-                let tonic_request = Request::new(request);
-                let tonic_response = grpc_client
-                    .fetch_docs(tonic_request)
-                    .await
-                    .map_err(|tonic_error| parse_grpc_error(&tonic_error))?;
-                Ok(tonic_response.into_inner())
+        with_node_authorization(async {
+            match &mut self.client_impl {
+                SearchServiceClientImpl::Grpc(grpc_client) => {
+                    let tonic_request = Request::new(request);
+                    let tonic_response = grpc_client
+                        .fetch_docs(tonic_request)
+                        .await
+                        .map_err(|tonic_error| parse_grpc_error(&tonic_error))?;
+                    Ok(tonic_response.into_inner())
+                }
+                SearchServiceClientImpl::Local(service) => service.fetch_docs(request).await,
             }
-            SearchServiceClientImpl::Local(service) => service.fetch_docs(request).await,
-        }
+        })
+        .await
     }
 
     /// Perform leaf list terms.
+    ///
+    /// Sent with the node token: see the hidden contract of [`SearchServiceClient`].
     pub async fn leaf_list_terms(
         &mut self,
         request: quickwit_proto::search::LeafListTermsRequest,
     ) -> crate::Result<quickwit_proto::search::LeafListTermsResponse> {
-        match &mut self.client_impl {
-            SearchServiceClientImpl::Grpc(grpc_client) => {
-                let tonic_request = Request::new(request);
-                let tonic_response = grpc_client
-                    .leaf_list_terms(tonic_request)
-                    .await
-                    .map_err(|tonic_error| parse_grpc_error(&tonic_error))?;
-                Ok(tonic_response.into_inner())
+        with_node_authorization(async {
+            match &mut self.client_impl {
+                SearchServiceClientImpl::Grpc(grpc_client) => {
+                    let tonic_request = Request::new(request);
+                    let tonic_response = grpc_client
+                        .leaf_list_terms(tonic_request)
+                        .await
+                        .map_err(|tonic_error| parse_grpc_error(&tonic_error))?;
+                    Ok(tonic_response.into_inner())
+                }
+                SearchServiceClientImpl::Local(service) => service.leaf_list_terms(request).await,
             }
-            SearchServiceClientImpl::Local(service) => service.leaf_list_terms(request).await,
-        }
+        })
+        .await
     }
 
     /// Gets the value associated to a key stored locally in the targeted node.
     /// This call is not "distributed".
     /// If the key is not present on the targeted search `None` is simply returned.
+    ///
+    /// Sent with the node token: see the hidden contract of [`SearchServiceClient`].
     pub async fn get_kv(&mut self, get_kv_req: GetKvRequest) -> crate::Result<Option<Vec<u8>>> {
-        match &mut self.client_impl {
-            SearchServiceClientImpl::Local(service) => {
-                let search_after_context_opt = service.get_kv(get_kv_req).await;
-                Ok(search_after_context_opt)
+        with_node_authorization(async {
+            match &mut self.client_impl {
+                SearchServiceClientImpl::Local(service) => {
+                    let search_after_context_opt = service.get_kv(get_kv_req).await;
+                    Ok(search_after_context_opt)
+                }
+                SearchServiceClientImpl::Grpc(grpc_client) => {
+                    let grpc_resp: tonic::Response<quickwit_proto::search::GetKvResponse> =
+                        grpc_client
+                            .get_kv(get_kv_req)
+                            .await
+                            .map_err(|tonic_error| parse_grpc_error(&tonic_error))?;
+                    let get_search_after_context_resp = grpc_resp.into_inner();
+                    Ok(get_search_after_context_resp.payload)
+                }
             }
-            SearchServiceClientImpl::Grpc(grpc_client) => {
-                let grpc_resp: tonic::Response<quickwit_proto::search::GetKvResponse> = grpc_client
-                    .get_kv(get_kv_req)
-                    .await
-                    .map_err(|tonic_error| parse_grpc_error(&tonic_error))?;
-                let get_search_after_context_resp = grpc_resp.into_inner();
-                Ok(get_search_after_context_resp.payload)
-            }
-        }
+        })
+        .await
     }
 
     /// Gets the value associated to a key stored locally in the targeted node.
     /// This call is not "distributed". It is up to the client to put the K,V pair
     /// on several nodes.
+    ///
+    /// Sent with the node token: see the hidden contract of [`SearchServiceClient`].
     pub async fn put_kv(&mut self, put_kv_req: PutKvRequest) -> crate::Result<()> {
-        match &mut self.client_impl {
-            SearchServiceClientImpl::Local(service) => {
-                service.put_kv(put_kv_req).await;
+        with_node_authorization(async {
+            match &mut self.client_impl {
+                SearchServiceClientImpl::Local(service) => {
+                    service.put_kv(put_kv_req).await;
+                }
+                SearchServiceClientImpl::Grpc(grpc_client) => {
+                    grpc_client
+                        .put_kv(put_kv_req)
+                        .await
+                        .map_err(|tonic_error| parse_grpc_error(&tonic_error))?;
+                }
             }
-            SearchServiceClientImpl::Grpc(grpc_client) => {
-                grpc_client
-                    .put_kv(put_kv_req)
-                    .await
-                    .map_err(|tonic_error| parse_grpc_error(&tonic_error))?;
-            }
-        }
-        Ok(())
+            Ok(())
+        })
+        .await
     }
 
     /// Returns the current load of the targeted node, expressed as the sum of job costs
@@ -341,29 +395,42 @@ impl SearchServiceClient {
 
     /// Indexers call report_splits to inform searchers node about the presence of a split, which
     /// would then be considered as a candidate for the searcher split cache.
+    ///
+    /// Sent with the node token: see the hidden contract of [`SearchServiceClient`].
     pub async fn report_splits(&mut self, report_splits_request: ReportSplitsRequest) {
-        match &mut self.client_impl {
-            SearchServiceClientImpl::Local(service) => {
-                let _ = service.report_splits(report_splits_request).await;
-            }
-            SearchServiceClientImpl::Grpc(search_client) => {
-                // Ignoring any error.
-                if search_client
-                    .report_splits(report_splits_request)
-                    .await
-                    .is_err()
-                {
-                    warn!(
-                        "Failed to report splits. This is not critical as this message is only \
-                         used to identify caching opportunities."
-                    );
+        with_node_authorization(async {
+            match &mut self.client_impl {
+                SearchServiceClientImpl::Local(service) => {
+                    let _ = service.report_splits(report_splits_request).await;
+                }
+                SearchServiceClientImpl::Grpc(search_client) => {
+                    // Ignoring any error.
+                    if search_client
+                        .report_splits(report_splits_request)
+                        .await
+                        .is_err()
+                    {
+                        warn!(
+                            "Failed to report splits. This is not critical as this message is \
+                             only used to identify caching opportunities."
+                        );
+                    }
                 }
             }
-        }
+        })
+        .await
     }
 }
 
-async fn fetch_load_uncached(mut client_impl: SearchServiceClientImpl) -> crate::Result<usize> {
+/// Sent with the node token: see the hidden contract of [`SearchServiceClient`]. The load is cached
+/// and shared by the concurrent callers, so it must not depend on the token of one of them anyway.
+async fn fetch_load_uncached(client_impl: SearchServiceClientImpl) -> crate::Result<usize> {
+    with_node_authorization(fetch_load_uncached_inner(client_impl)).await
+}
+
+async fn fetch_load_uncached_inner(
+    mut client_impl: SearchServiceClientImpl,
+) -> crate::Result<usize> {
     match &mut client_impl {
         SearchServiceClientImpl::Local(service) => Ok(service.get_load().await),
         SearchServiceClientImpl::Grpc(grpc_client) => {
@@ -408,7 +475,7 @@ pub fn create_search_client_from_channel(
     let client =
         quickwit_proto::search::search_service_client::SearchServiceClient::with_interceptor(
             channel,
-            SpanContextInterceptor,
+            SearchClientInterceptor,
         )
         .max_decoding_message_size(max_message_size.0 as usize)
         .max_encoding_message_size(max_message_size.0 as usize);

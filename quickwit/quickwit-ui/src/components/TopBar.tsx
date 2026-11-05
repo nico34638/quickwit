@@ -27,7 +27,9 @@ import Toolbar from "@mui/material/Toolbar";
 import { Discord } from "@styled-icons/fa-brands/Discord";
 import { useEffect, useMemo, useState } from "react";
 import quickwitLogoUrl from "../assets/img/quickwit-logo-with-title.svg";
+import { useAuth } from "../providers/AuthProvider";
 import { Client } from "../services/client";
+import UserMenu from "./UserMenu";
 
 const Logo = (props: React.ComponentProps<"img">) => (
   <img {...props} src={quickwitLogoUrl} alt="quickwit logo" />
@@ -47,12 +49,22 @@ declare module "@mui/material/AppBar" {
 const TopBar = () => {
   const [clusterId, setClusterId] = useState<string>("");
   const quickwitClient = useMemo(() => new Client(), []);
+  const { hasClusterRight } = useAuth();
 
   useEffect(() => {
-    quickwitClient.cluster().then((cluster) => {
-      setClusterId(cluster.cluster_id);
-    });
-  }, [quickwitClient]);
+    // The cluster state requires the `cluster` right when authorization is enabled.
+    if (!hasClusterRight) {
+      return;
+    }
+    quickwitClient.cluster().then(
+      (cluster) => {
+        setClusterId(cluster.cluster_id);
+      },
+      (error) => {
+        console.error("Failed to fetch the cluster ID", error);
+      },
+    );
+  }, [quickwitClient, hasClusterRight]);
 
   return (
     <StyledAppBar position="fixed" elevation={0} color="neutral">
@@ -71,6 +83,7 @@ const TopBar = () => {
             <Typography mx={2}>{clusterId}</Typography>
           </Tooltip>
         </Box>
+        <UserMenu />
         <Link href="https://quickwit.io/docs" target="_blank" sx={{ px: 2 }}>
           Docs
         </Link>
